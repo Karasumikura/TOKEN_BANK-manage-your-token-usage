@@ -1445,15 +1445,19 @@ function initSettings(){
   syncBudgetInputs();
   syncSettingsUI();
   applyLang();
-  // Event delegation for per-app/per-model budget inputs
-  document.addEventListener('input',function(ev){
-    var el=ev.target;
-    if(!el.dataset||!el.dataset.budgetType)return;
-    var val=parseFloat(el.value)||0;
-    var name=el.dataset.budgetName;
-    console.log('[budget] input event: type='+el.dataset.budgetType+' name='+name+' val='+val);
-    if(el.dataset.budgetType==='app'){_saveAppBudget(name,val)}
-    else if(el.dataset.budgetType==='model'){_saveModelBudget(name,val)}
+  // Event delegation for per-app/per-model budget inputs (on table containers)
+  var appDetail=$('#tBudgetAppDetail'),modDetail=$('#tBudgetModelDetail');
+  if(appDetail)appDetail.addEventListener('input',function(ev){
+    var el=ev.target;if(!el.dataset||!el.dataset.budgetType)return;
+    var val=parseFloat(el.value)||0;var name=el.dataset.budgetName;
+    console.log('[budget] app input: name='+name+' val='+val);
+    try{_saveAppBudget(name,val)}catch(e){console.error('[budget] save app error:',e)}
+  });
+  if(modDetail)modDetail.addEventListener('input',function(ev){
+    var el=ev.target;if(!el.dataset||!el.dataset.budgetType)return;
+    var val=parseFloat(el.value)||0;var name=el.dataset.budgetName;
+    console.log('[budget] model input: name='+name+' val='+val);
+    try{_saveModelBudget(name,val)}catch(e){console.error('[budget] save model error:',e)}
   });
 }
 function applyLang(){
