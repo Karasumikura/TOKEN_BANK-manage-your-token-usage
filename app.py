@@ -538,6 +538,21 @@ class Api:
         self._records = None
         return json.dumps({"ok": True})
 
+    def get_budget(self):
+        p = Path.home() / ".tokenbank" / "budget.json"
+        if p.exists():
+            try:
+                return p.read_text(encoding="utf-8")
+            except OSError:
+                pass
+        return json.dumps({"daily": 0, "monthly": 0, "mode": "token", "term": "limit", "app": {}, "model": {}})
+
+    def save_budget(self, budget_json):
+        d = Path.home() / ".tokenbank"
+        d.mkdir(exist_ok=True)
+        (d / "budget.json").write_text(budget_json, encoding="utf-8")
+        return json.dumps({"ok": True})
+
     def reset_pricing(self):
         custom_path = Path.home() / ".tokenbank" / "pricing.json"
         if custom_path.exists():
@@ -1437,14 +1452,18 @@ function initSettings(){
   numFmt=lsGet('tb-numfmt',lang==='zh'?'cn':'en');
   autoRefreshEnabled=lsGet('tb-autorefresh','on')==='on';
   refreshIntervalSec=parseInt(lsGet('tb-refreshinterval','30'),10)||30;
-  budgetMode=lsGet('tb-budget-mode','token');
-  budgetTerm=lsGet('tb-budget-term','limit');
-  budgetDaily=parseFloat(lsGet('tb-budget-daily','0'))||0;
-  budgetMonthly=parseFloat(lsGet('tb-budget-monthly','0'))||0;
-  _loadBudgetMaps();
-  syncBudgetInputs();
   syncSettingsUI();
   applyLang();
+  // Load budget from Python backend (file-based, not localStorage)
+  pywebview.api.get_budget().then(function(r){
+    try{
+      var b=JSON.parse(r);
+      budgetDaily=b.daily||0;budgetMonthly=b.monthly||0;
+      budgetMode=b.mode||'token';budgetTerm=b.term||'limit';
+      budgetAppModels=b.app||{};budgetModelModels=b.model||{};
+    }catch(e){console.error('load budget error:',e)}
+    syncBudgetInputs();syncSettingsUI();
+  }).catch(function(e){console.error('get_budget error:',e)});
   // Event delegation for budget Save/Delete buttons
   document.addEventListener('click',function(ev){
     var el=ev.target;
@@ -1454,10 +1473,8 @@ function initSettings(){
       var tr=el.closest('tr');if(!tr)return;
       var ipt=tr.querySelector('._budgetIpt');if(!ipt)return;
       var val=parseFloat(ipt.value)||0;
-      console.log('[budget] save: type='+type+' name='+name+' val='+val);
       try{if(type==='app')_saveAppBudget(name,val);else _saveModelBudget(name,val)}catch(e){console.error(e)}
     }else if(el.classList.contains('_budgetDel')){
-      console.log('[budget] delete: type='+type+' name='+name);
       try{if(type==='app')_saveAppBudget(name,0);else _saveModelBudget(name,0)}catch(e){console.error(e)}
     }
   });
@@ -1889,48 +1906,40 @@ function syncBudgetInputs(){
   if(d2)d2.value=budgetDaily;if(m2)m2.value=budgetMonthly;
 }
 function setBudgetMode(mode){
-  budgetMode=mode;lsSet('tb-budget-mode',mode);
+  budgetMode=mode;
   var btns=$('#budgetModeToggle').querySelectorAll('button');
   btns.forEach(function(b){b.classList.toggle('active',b.textContent.trim()===t(mode==='token'?'budgetModeToken':'budgetModePrice'))});
-  syncBudgetInputs();renderBudget();checkBudget();
+  _saveBudgetToBackend();syncBudgetInputs();renderBudget();checkBudget();
 }
 function setBudgetTerm(term){
-  budgetTerm=term;lsSet('tb-budget-term',term);
-  syncSettingsUI();renderBudget();
+  budgetTerm=term;
+  _saveBudgetToBackend();syncSettingsUI();renderBudget();
 }
 function setBudget(){
   var d2=$('#budgetDailyInput2'),m2=$('#budgetMonthlyInput2');
   budgetDaily=d2?parseFloat(d2.value)||0:budgetDaily;
   budgetMonthly=m2?parseFloat(m2.value)||0:budgetMonthly;
-  lsSet('tb-budget-daily',String(budgetDaily));
-  lsSet('tb-budget-monthly',String(budgetMonthly));
-  syncBudgetInputs();checkBudget();renderBudget();
+  _saveBudgetToBackend();syncBudgetInputs();checkBudget();renderBudget();
 }
 function setBudgetFromForm(){setBudget()}
 function resetBudget(){
-  budgetDaily=0;budgetMonthly=0;
-  lsSet('tb-budget-daily','0');lsSet('tb-budget-monthly','0');
-  budgetAppModels={};budgetModelModels={};
-  lsSet('tb-budget-app','{}');lsSet('tb-budget-model','{}');
-  syncBudgetInputs();checkBudget();renderBudget();
+  budgetDaily=0;budgetMonthly=0;budgetAppModels={};budgetModelModels={};
+  _saveBudgetToBackend();syncBudgetInputs();checkBudget();renderBudget();
 }
 function _loadBudgetMaps(){
-  try{budgetAppModels=JSON.parse(localStorage.getItem('tb-budget-app')||'{}')}catch(e){budgetAppModels={}}
-  try{budgetModelModels=JSON.parse(localStorage.getItem('tb-budget-model')||'{}')}catch(e){budgetModelModels={}}
+  // Already loaded from Python API in initBudget; just read from in-memory
+}
+function _saveBudgetToBackend(){
+  var data={daily:budgetDaily,monthly:budgetMonthly,mode:budgetMode,term:budgetTerm,app:budgetAppModels,model:budgetModelModels};
+  pywebview.api.save_budget(JSON.stringify(data)).catch(function(e){console.error('save_budget error:',e)});
 }
 function _saveAppBudget(name,val){
-  console.log('[budget] _saveAppBudget: name='+name+' val='+val);
   if(val>0)budgetAppModels[name]=val;else delete budgetAppModels[name];
-  lsSet('tb-budget-app',JSON.stringify(budgetAppModels));
-  console.log('[budget] saved tb-budget-app='+localStorage.getItem('tb-budget-app'));
-  _refreshBudgetDist();checkBudget();
+  _saveBudgetToBackend();_refreshBudgetDist();checkBudget();
 }
 function _saveModelBudget(name,val){
-  console.log('[budget] _saveModelBudget: name='+name+' val='+val);
   if(val>0)budgetModelModels[name]=val;else delete budgetModelModels[name];
-  lsSet('tb-budget-model',JSON.stringify(budgetModelModels));
-  console.log('[budget] saved tb-budget-model='+localStorage.getItem('tb-budget-model'));
-  _refreshBudgetDist();checkBudget();
+  _saveBudgetToBackend();_refreshBudgetDist();checkBudget();
 }
 function _isEditingBudgetInput(){
   var el=document.activeElement;
