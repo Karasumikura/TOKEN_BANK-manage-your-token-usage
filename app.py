@@ -1445,19 +1445,22 @@ function initSettings(){
   syncBudgetInputs();
   syncSettingsUI();
   applyLang();
-  // Event delegation for per-app/per-model budget inputs
-  try{
-    document.addEventListener('input',function(ev){
-      var el=ev.target;if(!el||!el.dataset||!el.dataset.budgetType)return;
-      var val=parseFloat(el.value)||0;var name=el.dataset.budgetName;
-      console.log('[budget] input: type='+el.dataset.budgetType+' name='+name+' val='+val);
-      try{
-        if(el.dataset.budgetType==='app')_saveAppBudget(name,val);
-        else if(el.dataset.budgetType==='model')_saveModelBudget(name,val);
-      }catch(e){console.error('[budget] save error:',e)}
-    });
-    console.log('[budget] listener registered');
-  }catch(e){console.error('[budget] listener registration error:',e)}
+  // Event delegation for budget Save/Delete buttons
+  document.addEventListener('click',function(ev){
+    var el=ev.target;
+    if(!el||!el.dataset||!el.dataset.type||!el.dataset.name)return;
+    var type=el.dataset.type,name=el.dataset.name;
+    if(el.classList.contains('_budgetSave')){
+      var tr=el.closest('tr');if(!tr)return;
+      var ipt=tr.querySelector('._budgetIpt');if(!ipt)return;
+      var val=parseFloat(ipt.value)||0;
+      console.log('[budget] save: type='+type+' name='+name+' val='+val);
+      try{if(type==='app')_saveAppBudget(name,val);else _saveModelBudget(name,val)}catch(e){console.error(e)}
+    }else if(el.classList.contains('_budgetDel')){
+      console.log('[budget] delete: type='+type+' name='+name);
+      try{if(type==='app')_saveAppBudget(name,0);else _saveModelBudget(name,0)}catch(e){console.error(e)}
+    }
+  });
 }
 function applyLang(){
   document.documentElement.lang=lang==='zh'?'zh-CN':'en';
@@ -2049,18 +2052,28 @@ function renderBudget(){
   $('#tBudgetApp').innerHTML=th2;
   // Per-app/per-model budget detail tables — skip re-render if user is editing
   if(!_isEditingBudgetInput()){
-    var appH='<tr><th>'+t('thApp')+'</th><th>'+(lang==='zh'?'已用':'Used')+'</th><th>'+_budgetLabel()+'</th><th>'+rateLabel+'</th><th>'+ratioLabel+'</th></tr>';
+    var btnStyle='padding:2px 8px;border:1px solid rgba(127,127,127,.2);border-radius:4px;background:var(--surface2);color:var(--text);font-size:10px;cursor:pointer;font-family:inherit';
+    var iptStyle='width:70px;background:var(--surface2);border:1px solid rgba(127,127,127,.15);color:var(--text);padding:3px 6px;border-radius:4px;font-size:11px;font-family:inherit';
+    var appH='<tr><th>'+t('thApp')+'</th><th>'+(lang==='zh'?'已用':'Used')+'</th><th>'+_budgetLabel()+'</th><th>'+(lang==='zh'?'操作':'Action')+'</th><th>'+rateLabel+'</th><th>'+ratioLabel+'</th></tr>';
     appEntries.forEach(function(e){
       var name=e[0],val=e[1][valKey]||0,limit=budgetAppModels[name]||0;
       var rate=limit>0?val/limit*100:0;var ratio=val/totalA*100;
-      appH+='<tr><td>'+name+'</td><td>'+fmtVal(val)+'</td><td><input type="number" min="0" step="1" value="'+limit+'" data-budget-type="app" data-budget-name="'+escH(name)+'" style="width:80px;background:var(--surface2);border:1px solid rgba(127,127,127,.15);color:var(--text);padding:3px 6px;border-radius:4px;font-size:11px;font-family:inherit"></td><td>'+(limit>0?_pctBar(rate):'<span style="color:var(--muted);font-size:11px">-</span>')+'</td><td>'+_pctBar(ratio)+'</td></tr>';
+      appH+='<tr><td>'+name+'</td><td>'+fmtVal(val)+'</td>'
+        +'<td><input type="number" class="_budgetIpt" min="0" step="1" value="'+limit+'" data-type="app" data-name="'+escH(name)+'" style="'+iptStyle+'"></td>'
+        +'<td><button class="_budgetSave" data-type="app" data-name="'+escH(name)+'" style="'+btnStyle+'">'+(lang==='zh'?'保存':'Save')+'</button>'
+        +(limit>0?' <button class="_budgetDel" data-type="app" data-name="'+escH(name)+'" style="'+btnStyle+'">X</button>':'')+'</td>'
+        +'<td>'+(limit>0?_pctBar(rate):'<span style="color:var(--muted);font-size:11px">-</span>')+'</td><td>'+_pctBar(ratio)+'</td></tr>';
     });
     $('#tBudgetAppDetail').innerHTML=appH;
-    var modH='<tr><th>'+t('thModel')+'</th><th>'+(lang==='zh'?'已用':'Used')+'</th><th>'+_budgetLabel()+'</th><th>'+rateLabel+'</th><th>'+ratioLabel+'</th></tr>';
+    var modH='<tr><th>'+t('thModel')+'</th><th>'+(lang==='zh'?'已用':'Used')+'</th><th>'+_budgetLabel()+'</th><th>'+(lang==='zh'?'操作':'Action')+'</th><th>'+rateLabel+'</th><th>'+ratioLabel+'</th></tr>';
     modelEntries.forEach(function(e){
       var name=e[0],val=e[1][valKey]||0,limit=budgetModelModels[name]||0;
       var rate=limit>0?val/limit*100:0;var ratio=val/totalM*100;
-      modH+='<tr><td>'+name+'</td><td>'+fmtVal(val)+'</td><td><input type="number" min="0" step="1" value="'+limit+'" data-budget-type="model" data-budget-name="'+escH(name)+'" style="width:80px;background:var(--surface2);border:1px solid rgba(127,127,127,.15);color:var(--text);padding:3px 6px;border-radius:4px;font-size:11px;font-family:inherit"></td><td>'+(limit>0?_pctBar(rate):'<span style="color:var(--muted);font-size:11px">-</span>')+'</td><td>'+_pctBar(ratio)+'</td></tr>';
+      modH+='<tr><td>'+name+'</td><td>'+fmtVal(val)+'</td>'
+        +'<td><input type="number" class="_budgetIpt" min="0" step="1" value="'+limit+'" data-type="model" data-name="'+escH(name)+'" style="'+iptStyle+'"></td>'
+        +'<td><button class="_budgetSave" data-type="model" data-name="'+escH(name)+'" style="'+btnStyle+'">'+(lang==='zh'?'保存':'Save')+'</button>'
+        +(limit>0?' <button class="_budgetDel" data-type="model" data-name="'+escH(name)+'" style="'+btnStyle+'">X</button>':'')+'</td>'
+        +'<td>'+(limit>0?_pctBar(rate):'<span style="color:var(--muted);font-size:11px">-</span>')+'</td><td>'+_pctBar(ratio)+'</td></tr>';
     });
     $('#tBudgetModelDetail').innerHTML=modH;
   }
