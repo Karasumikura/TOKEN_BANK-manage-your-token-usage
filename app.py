@@ -1451,6 +1451,7 @@ function initSettings(){
     if(!el.dataset||!el.dataset.budgetType)return;
     var val=parseFloat(el.value)||0;
     var name=el.dataset.budgetName;
+    console.log('[budget] input event: type='+el.dataset.budgetType+' name='+name+' val='+val);
     if(el.dataset.budgetType==='app'){_saveAppBudget(name,val)}
     else if(el.dataset.budgetType==='model'){_saveModelBudget(name,val)}
   });
@@ -1912,12 +1913,18 @@ function _loadBudgetMaps(){
   try{budgetModelModels=JSON.parse(localStorage.getItem('tb-budget-model')||'{}')}catch(e){budgetModelModels={}}
 }
 function _saveAppBudget(name,val){
+  console.log('[budget] _saveAppBudget: name='+name+' val='+val);
   if(val>0)budgetAppModels[name]=val;else delete budgetAppModels[name];
-  lsSet('tb-budget-app',JSON.stringify(budgetAppModels));_refreshBudgetDist();checkBudget();
+  lsSet('tb-budget-app',JSON.stringify(budgetAppModels));
+  console.log('[budget] saved tb-budget-app='+localStorage.getItem('tb-budget-app'));
+  _refreshBudgetDist();checkBudget();
 }
 function _saveModelBudget(name,val){
+  console.log('[budget] _saveModelBudget: name='+name+' val='+val);
   if(val>0)budgetModelModels[name]=val;else delete budgetModelModels[name];
-  lsSet('tb-budget-model',JSON.stringify(budgetModelModels));_refreshBudgetDist();checkBudget();
+  lsSet('tb-budget-model',JSON.stringify(budgetModelModels));
+  console.log('[budget] saved tb-budget-model='+localStorage.getItem('tb-budget-model'));
+  _refreshBudgetDist();checkBudget();
 }
 function _isEditingBudgetInput(){
   var el=document.activeElement;
