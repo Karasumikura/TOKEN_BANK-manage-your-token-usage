@@ -23,6 +23,7 @@ if sys.platform == "win32":
 HOME = Path.home()
 CLAUDE_PROJECTS = HOME / ".claude" / "projects"
 CODEX_SESSIONS = HOME / ".codex" / "sessions"
+CODEX_ARCHIVED = HOME / ".codex" / "archived_sessions"
 CLINE_BASE = HOME / "AppData" / "Roaming" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev"
 
 # ── Model pricing (USD per 1M tokens) ────────────────────────────────────────
@@ -73,66 +74,100 @@ def calc_cost(model, inp, out, cache_read):
 
 def load_claude_sessions():
     records = []
+    session_paths = {}
     if not CLAUDE_PROJECTS.exists():
-        return records
+        return records, session_paths
     for jsonl_path in CLAUDE_PROJECTS.rglob("*.jsonl"):
         if "subagents" in str(jsonl_path):
             continue
         rel = jsonl_path.relative_to(CLAUDE_PROJECTS)
         project = rel.parts[0] if rel.parts else "unknown"
         session_id = jsonl_path.stem
+        session_paths[session_id] = str(jsonl_path)
         summary = ""
         try:
-            lines = []
             with open(jsonl_path, encoding="utf-8") as f:
                 for line in f:
                     try:
                         obj = json.loads(line.strip())
-                        lines.append(obj)
                     except json.JSONDecodeError:
                         continue
-            for obj in lines:
-                if obj.get("type") == "system" and obj.get("subtype") == "away_summary":
-                    raw = re.sub(r'^\s+|\s+$', '', obj.get("content", ""))
-                    summary = re.sub(r'\s*\(disable recaps in /config\)\s*$', '', raw)
-            for obj in lines:
-                if obj.get("type") != "assistant":
-                    continue
-                usage = obj.get("message", {}).get("usage", {})
-                inp = usage.get("input_tokens", 0)
-                out = usage.get("output_tokens", 0)
-                cr = usage.get("cache_read_input_tokens", 0)
-                cc = usage.get("cache_creation_input_tokens", 0)
-                if inp == 0 and out == 0:
-                    continue
-                model = obj.get("message", {}).get("model", "unknown")
-                ts = obj.get("timestamp", "")
-                local_dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone() if ts else None
-                date_str = local_dt.strftime("%Y-%m-%d") if local_dt else ""
-                ts_local = local_dt.strftime("%Y-%m-%dT%H:%M:%S") if local_dt else ts
-                records.append({
-                    "app": "claude", "project": project, "session": session_id,
-                    "summary": summary, "model": model, "timestamp": ts_local,
-                    "date": date_str,
-                    "input": inp, "output": out, "cache_read": cr, "cache_create": cc,
-                    "cost": calc_cost(model, inp, out, cr),
-                })
+                    if obj.get("type") == "system" and obj.get("subtype") == "away_summary":
+                        raw = re.sub(r'^\s+|\s+$', '', obj.get("content", ""))
+                        summary = re.sub(r'\s*\(disable recaps in /config\)\s*$', '', raw)
+                    elif obj.get("type") == "assistant":
+                        usage = obj.get("message", {}).get("usage", {})
+                        inp = usage.get("input_tokens", 0)
+                        out = usage.get("output_tokens", 0)
+                        cr = usage.get("cache_read_input_tokens", 0)
+                        cc = usage.get("cache_creation_input_tokens", 0)
+                        if inp == 0 and out == 0:
+                            continue
+                        model = obj.get("message", {}).get("model", "unknown")
+                        ts = obj.get("timestamp", "")
+                        local_dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone() if ts else None
+                        date_str = local_dt.strftime("%Y-%m-%d") if local_dt else ""
+                        ts_local = local_dt.strftime("%Y-%m-%dT%H:%M:%S") if local_dt else ts
+                        records.append({
+                            "app": "claude", "project": project, "session": session_id,
+                            "summary": summary, "model": model, "timestamp": ts_local,
+                            "date": date_str,
+                            "input": inp, "output": out, "cache_read": cr, "cache_create": cc,
+                            "cost": calc_cost(model, inp, out, cr),
+                        })
         except (UnicodeDecodeError, OSError):
             continue
-    return records
+    return records, session_paths
+
+
+def _normalize_codex_model(model):
+    """Strip provider prefix and date suffix from Codex model names."""
+    if not model:
+        return model
+    m = model.lower().strip()
+    # Strip provider prefix: "openai/gpt-5.4" -> "gpt-5.4"
+    if "/" in m:
+        m = m.split("/")[-1]
+    # Strip ISO date suffix: "gpt-5.4-2026-03-05" -> "gpt-5.4"
+    m = re.sub(r'-\d{4}-\d{2}-\d{2}$', '', m)
+    # Strip compact date suffix: "gpt-5.4-20260305" -> "gpt-5.4"
+    m = re.sub(r'-\d{8}$', '', m)
+    return m
+
+
+def _parse_codex_cumulative(info):
+    """Extract cumulative token values from token_count info dict."""
+    u = info.get("total_token_usage", {})
+    inp = u.get("input_tokens", 0)
+    out = u.get("output_tokens", 0)
+    cached = u.get("cached_input_tokens", 0) or u.get("cache_read_input_tokens", 0)
+    return inp, out, cached
+
+
+def _parse_codex_delta(info):
+    """Extract per-call token values from last_token_usage."""
+    u = info.get("last_token_usage", {})
+    inp = u.get("input_tokens", 0)
+    out = u.get("output_tokens", 0)
+    cached = u.get("cached_input_tokens", 0) or u.get("cache_read_input_tokens", 0)
+    return inp, out, cached
 
 
 def load_codex_sessions():
     records = []
-    if not CODEX_SESSIONS.exists():
-        return records
-    for jsonl_path in CODEX_SESSIONS.rglob("*.jsonl"):
+    session_paths = {}
+    # Collect from both sessions/ and archived_sessions/
+    codex_files = []
+    if CODEX_SESSIONS.exists():
+        codex_files.extend(CODEX_SESSIONS.rglob("*.jsonl"))
+    if CODEX_ARCHIVED.exists():
+        codex_files.extend(CODEX_ARCHIVED.glob("*.jsonl"))
+    for jsonl_path in codex_files:
         session_id = jsonl_path.stem
+        session_paths[session_id] = str(jsonl_path)
         session_date = session_id[8:18] if session_id.startswith("rollout-") and len(session_id) > 18 else ""
         model = None
-        max_total = max_input = max_output = max_cached = 0
-        last_ts = ""
-        msg_count = 0
+        prev_total = None  # (input, output, cached) cumulative from previous event
         try:
             with open(jsonl_path, encoding="utf-8") as f:
                 for line in f:
@@ -140,49 +175,53 @@ def load_codex_sessions():
                         obj = json.loads(line.strip())
                     except json.JSONDecodeError:
                         continue
-                    if obj.get("type") == "turn_context":
-                        model = obj.get("payload", {}).get("model")
-                    if obj.get("type") == "event_msg":
+                    etype = obj.get("type", "")
+                    if etype == "turn_context":
+                        raw_model = obj.get("payload", {}).get("model") or obj.get("payload", {}).get("info", {}).get("model")
+                        model = _normalize_codex_model(raw_model)
+                    elif etype == "event_msg":
                         payload = obj.get("payload", {})
-                        msg_type = payload.get("type", "")
-                        if msg_type in ("user_message", "task_started", "task_complete", "error"):
-                            msg_count += 1
-                        if msg_type == "token_count":
-                            info = payload.get("info")
-                            if not info:
-                                continue
-                            for field in ("total_token_usage", "last_token_usage"):
-                                u = info.get(field, {})
-                                t = u.get("total_tokens", 0)
-                                if t > max_total:
-                                    max_total = t
-                                    max_input = u.get("input_tokens", 0)
-                                    max_output = u.get("output_tokens", 0)
-                                    max_cached = u.get("cached_input_tokens", 0)
-                                    last_ts = obj.get("timestamp", "")
+                        if payload.get("type") != "token_count":
+                            continue
+                        info = payload.get("info")
+                        if not info:
+                            continue
+                        # Priority: total_token_usage (cumulative) with delta computation
+                        # Fallback: last_token_usage (per-call, use directly)
+                        has_total = "total_token_usage" in info
+                        if has_total:
+                            cur_inp, cur_out, cur_cached = _parse_codex_cumulative(info)
+                            # Compute delta from previous cumulative
+                            if prev_total is not None:
+                                delta_inp = max(0, cur_inp - prev_total[0])
+                                delta_out = max(0, cur_out - prev_total[1])
+                                delta_cached = max(0, cur_cached - prev_total[2])
+                            else:
+                                delta_inp, delta_out, delta_cached = cur_inp, cur_out, cur_cached
+                            prev_total = (cur_inp, cur_out, cur_cached)
+                        else:
+                            delta_inp, delta_out, delta_cached = _parse_codex_delta(info)
+                        # Skip zero-delta events (task boundaries)
+                        if delta_inp == 0 and delta_out == 0:
+                            continue
+                        # Clamp: cached should not exceed input
+                        delta_cached = min(delta_cached, delta_inp)
+                        ts = obj.get("timestamp", "")
+                        local_dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone() if ts else None
+                        ts_local = local_dt.strftime("%Y-%m-%dT%H:%M:%S") if local_dt else ts
+                        date_str = local_dt.strftime("%Y-%m-%d") if local_dt else session_date
+                        non_cached = max(0, delta_inp - delta_cached)
+                        records.append({
+                            "app": "codex", "project": "codex", "session": session_id,
+                            "summary": "", "model": model or "unknown", "timestamp": ts_local,
+                            "date": date_str or session_date,
+                            "input": non_cached, "output": delta_out,
+                            "cache_read": delta_cached, "cache_create": 0,
+                            "cost": calc_cost(model or "unknown", non_cached, delta_out, delta_cached),
+                        })
         except (UnicodeDecodeError, OSError):
             continue
-        if max_total == 0:
-            continue
-        if max_input == 0 and max_output == 0:
-            max_output = int(max_total * 0.3)
-            max_input = max_total - max_output
-        non_cached = max(0, max_input - max_cached)
-        if msg_count == 0:
-            msg_count = 1
-        codex_local_dt = datetime.fromisoformat(last_ts.replace("Z", "+00:00")).astimezone() if last_ts else None
-        codex_ts_local = codex_local_dt.strftime("%Y-%m-%dT%H:%M:%S") if codex_local_dt else last_ts
-        codex_date = codex_local_dt.strftime("%Y-%m-%d") if codex_local_dt else ""
-        records.append({
-            "app": "codex", "project": "codex", "session": session_id,
-            "summary": "", "model": model or "unknown", "timestamp": codex_ts_local,
-            "date": session_date or codex_date,
-            "input": non_cached, "output": max_output,
-            "cache_read": max_cached, "cache_create": 0,
-            "cost": calc_cost(model or "unknown", non_cached, max_output, max_cached),
-            "count": msg_count,
-        })
-    return records
+    return records, session_paths
 
 
 def load_cline_sessions():
@@ -270,6 +309,8 @@ def quit_app(icon=None, item=None):
         _tray_icon.stop()
     if _app_window:
         _app_window.destroy()
+    sys.stdout.flush()
+    sys.stderr.flush()
     os._exit(0)
 
 
@@ -316,15 +357,23 @@ def setup_tray():
 class Api:
     def __init__(self):
         self._records = None
+        self._all_processed = None
+        self._session_paths = {}
 
     def load_data(self):
         if self._records is None:
-            self._records = load_claude_sessions() + load_codex_sessions()
+            claude_records, claude_paths = load_claude_sessions()
+            codex_records, codex_paths = load_codex_sessions()
+            self._records = claude_records + codex_records
             # self._records += load_cline_sessions()  # TODO: fix Cline display bugs
+            self._session_paths = {**claude_paths, **codex_paths}
+            self._all_processed = None
         return self._records
 
     def get_all(self):
-        return json.dumps(self._process(self.load_data()))
+        if self._all_processed is None:
+            self._all_processed = self._process(self.load_data())
+        return json.dumps(self._all_processed)
 
     def get_filtered(self, start_date, end_date):
         records = [r for r in self.load_data() if start_date <= r["date"] <= end_date]
@@ -376,12 +425,14 @@ class Api:
 
     def get_session_detail(self, session_id):
         messages = []
-        for jsonl_path in CLAUDE_PROJECTS.rglob("*.jsonl"):
-            if "subagents" in str(jsonl_path):
-                continue
-            if jsonl_path.stem == session_id:
+        self.load_data()
+        jsonl_path = self._session_paths.get(session_id)
+        if jsonl_path:
+            p = Path(jsonl_path)
+            if p.exists():
                 try:
-                    with open(jsonl_path, encoding="utf-8") as f:
+                    with open(p, encoding="utf-8") as f:
+                        prev_total = None
                         for line in f:
                             try:
                                 obj = json.loads(line.strip())
@@ -403,40 +454,44 @@ class Api:
                                     messages.append({"type": "user", "ts": ts, "text": str(content)[:300]})
                                 elif tp == "system":
                                     messages.append({"type": "system", "ts": ts, "text": obj.get("content", "")[:200]})
+                                elif tp == "event_msg":
+                                    payload = obj.get("payload", {})
+                                    mt = payload.get("type", "")
+                                    if mt == "user_message":
+                                        messages.append({"type": "user", "ts": ts, "text": str(payload.get("message", ""))[:300]})
+                                    elif mt == "token_count":
+                                        info = payload.get("info", {})
+                                        if not info:
+                                            continue
+                                        has_total = "total_token_usage" in info
+                                        if has_total:
+                                            u = info["total_token_usage"]
+                                            cur_inp = u.get("input_tokens", 0)
+                                            cur_out = u.get("output_tokens", 0)
+                                            cur_cached = u.get("cached_input_tokens", 0) or u.get("cache_read_input_tokens", 0)
+                                            if prev_total is not None:
+                                                delta_inp = max(0, cur_inp - prev_total[0])
+                                                delta_out = max(0, cur_out - prev_total[1])
+                                                delta_cached = max(0, cur_cached - prev_total[2])
+                                            else:
+                                                delta_inp, delta_out, delta_cached = cur_inp, cur_out, cur_cached
+                                            prev_total = (cur_inp, cur_out, cur_cached)
+                                        else:
+                                            u = info.get("last_token_usage", {})
+                                            delta_inp = u.get("input_tokens", 0)
+                                            delta_out = u.get("output_tokens", 0)
+                                            delta_cached = u.get("cached_input_tokens", 0) or u.get("cache_read_input_tokens", 0)
+                                        if delta_inp == 0 and delta_out == 0:
+                                            continue
+                                        delta_cached = min(delta_cached, delta_inp)
+                                        messages.append({"type": "token", "ts": ts,
+                                                         "input": delta_inp,
+                                                         "output": delta_out,
+                                                         "cache_read": delta_cached})
                             except json.JSONDecodeError:
                                 continue
                 except (UnicodeDecodeError, OSError):
                     pass
-                break
-        if not messages:
-            for jsonl_path in CODEX_SESSIONS.rglob("*.jsonl"):
-                if jsonl_path.stem == session_id:
-                    try:
-                        with open(jsonl_path, encoding="utf-8") as f:
-                            for line in f:
-                                try:
-                                    obj = json.loads(line.strip())
-                                    if obj.get("type") == "event_msg":
-                                        payload = obj.get("payload", {})
-                                        mt = payload.get("type", "")
-                                        ts = obj.get("timestamp", "")
-                                        if mt == "user_message":
-                                            messages.append({"type": "user", "ts": ts, "text": str(payload.get("message", ""))[:300]})
-                                        elif mt == "token_count":
-                                            info = payload.get("info", {})
-                                            for field in ("total_token_usage", "last_token_usage"):
-                                                u = info.get(field, {})
-                                                if u.get("total_tokens", 0) > 0:
-                                                    messages.append({"type": "token", "ts": ts,
-                                                                     "input": u.get("input_tokens", 0),
-                                                                     "output": u.get("output_tokens", 0),
-                                                                     "cache_read": u.get("cached_input_tokens", 0)})
-                                                    break
-                                except json.JSONDecodeError:
-                                    continue
-                    except (UnicodeDecodeError, OSError):
-                        pass
-                    break
         return json.dumps({"id": session_id, "messages": messages})
 
     def get_heatmap(self, start_date="", end_date=""):
@@ -789,8 +844,8 @@ td{padding:10px 10px;transition:background .2s ease;white-space:nowrap}
 td:last-child{max-width:180px;overflow:hidden;text-overflow:ellipsis}
 tbody tr:nth-child(even){background:rgba(255,255,255,.015)}
 :root[data-theme="light"] tbody tr:nth-child(even){background:rgba(0,0,0,.015)}
-tr{animation:rowIn .4s var(--ease-elastic) both}
-tr:nth-child(1){animation-delay:0s}tr:nth-child(2){animation-delay:.04s}tr:nth-child(3){animation-delay:.08s}tr:nth-child(4){animation-delay:.1s}tr:nth-child(5){animation-delay:.13s}tr:nth-child(6){animation-delay:.16s}tr:nth-child(7){animation-delay:.19s}tr:nth-child(8){animation-delay:.21s}tr:nth-child(9){animation-delay:.24s}tr:nth-child(10){animation-delay:.27s}
+tbody tr:nth-child(-n+10){animation:rowIn .4s var(--ease-elastic) both}
+tbody tr:nth-child(1){animation-delay:0s}tbody tr:nth-child(2){animation-delay:.04s}tbody tr:nth-child(3){animation-delay:.08s}tbody tr:nth-child(4){animation-delay:.1s}tbody tr:nth-child(5){animation-delay:.13s}tbody tr:nth-child(6){animation-delay:.16s}tbody tr:nth-child(7){animation-delay:.19s}tbody tr:nth-child(8){animation-delay:.21s}tbody tr:nth-child(9){animation-delay:.24s}tbody tr:nth-child(10){animation-delay:.27s}
 tr:hover td{background:rgba(255,255,255,.05)}
 :root[data-theme="light"] tr:hover td{background:rgba(0,0,0,.04)}
 :root[data-theme="light"]::-webkit-scrollbar-thumb{background:#ced4da}
@@ -1258,9 +1313,9 @@ function fmt(n){
   if(numFmt==='cn'){
     if(n>=1e8)return(n/1e8).toFixed(2)+'亿';
     if(n>=1e4)return(n/1e4).toFixed(1)+'万';
-    return String(n);
+    return n;
   }
-  if(n>=1e9)return(n/1e9).toFixed(1)+'B';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return String(n);
+  if(n>=1e9)return(n/1e9).toFixed(1)+'B';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return n;
 }
 function fmtC(c){if(c===0)return'$0.00';if(c<.01)return'$'+c.toFixed(4);return'$'+c.toFixed(2)}
 function truncW(s,maxW){
@@ -1526,11 +1581,14 @@ function line(k,labels,datasets,opts={}){
             ...opts.scales||{}},
     elements:{point:{radius:2,hoverRadius:5,hoverBorderWidth:2,hoverBackgroundColor:'#fff'},line:{tension:.3,borderWidth:2}}}});
 }
+var _doughnutTimers={};
 function doughnut(k,labels,data){
-  kill(k);const ctx=document.getElementById(k);if(!ctx)return;
+  kill(k);if(_doughnutTimers[k]){clearTimeout(_doughnutTimers[k]);delete _doughnutTimers[k]}
+  const ctx=document.getElementById(k);if(!ctx)return;
   const bg=['#818cf8','#22d3ee','#4ade80','#fbbf24','#f87171','#c084fc','#f472b6','#60a5fa'];
-  setTimeout(function(){
-    if(!ctx.parentElement)return;
+  _doughnutTimers[k]=setTimeout(function(){
+    delete _doughnutTimers[k];
+    if(!ctx.parentElement||charts[k])return;
     charts[k]=new Chart(ctx,{type:'doughnut',data:{labels,datasets:[{data,backgroundColor:bg,borderWidth:0}]},
       options:{responsive:true,maintainAspectRatio:false,cutout:'65%',
         animation:{animateRotate:_animEnabled,animateScale:_animEnabled,duration:_animEnabled?1200:0,easing:_easeElastic},
@@ -1926,9 +1984,6 @@ function resetBudget(){
   budgetDaily=0;budgetMonthly=0;budgetAppModels={};budgetModelModels={};
   _saveBudgetToBackend();syncBudgetInputs();checkBudget();renderBudget();
 }
-function _loadBudgetMaps(){
-  // Already loaded from Python API in initBudget; just read from in-memory
-}
 function _saveBudgetToBackend(){
   var data={daily:budgetDaily,monthly:budgetMonthly,mode:budgetMode,term:budgetTerm,app:budgetAppModels,model:budgetModelModels};
   pywebview.api.save_budget(JSON.stringify(data)).catch(function(e){console.error('save_budget error:',e)});
@@ -1949,7 +2004,7 @@ function _refreshBudgetDist(){
   var _d=_fullDataAll||fullData;if(!_d)return;
   var isToken=budgetMode==='token';var valKey=isToken?'total':'cost';
   var fmtVal=function(v){return isToken?fmt(v):fmtC(v)};
-  _loadBudgetMaps();
+
   var sortFn=function(a,b){return(b[1][valKey]||0)-(a[1][valKey]||0)};
   var modelEntries=Object.entries(_d.by_model||{}).sort(sortFn);
   var totalM=modelEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
@@ -2042,7 +2097,7 @@ function renderBudget(){
   // Compute per-model and per-app data
   var valKey=isToken?'total':'cost';
   var fmtVal=function(v){return isToken?fmt(v):fmtC(v)};
-  _loadBudgetMaps();
+
   var sortFn=function(a,b){return(b[1][valKey]||0)-(a[1][valKey]||0)};
   var modelEntries=Object.entries(_d.by_model||{}).sort(sortFn);
   var totalM=modelEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
@@ -2090,7 +2145,7 @@ function checkBudget(){
   var _d=_fullDataAll||fullData;
   if(!_d)return;
   var el=$('#budgetWarn');if(!el)return;
-  _loadBudgetMaps();
+
   var isToken=budgetMode==='token';
   var today=_bTodayTokens(),month=_bMonthTokens();
   var todayVal=isToken?today.tokens:today.cost;
