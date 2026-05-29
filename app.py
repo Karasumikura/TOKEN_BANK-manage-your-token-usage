@@ -1985,7 +1985,8 @@ function _fmtBudget(v,isToken){return isToken?fmt(v)+' tok':'$'+v.toFixed(2)}
 function _budgetLabel(){return budgetTerm==='target'?t('budgetTermTarget'):t('budgetTermLimit')}
 function renderBudget(){
   var _d=_fullDataAll||fullData;
-  if(!_d)return;
+  if(!_d){console.log('[budget] renderBudget: no data');return;}
+  console.log('[budget] renderBudget: by_model='+Object.keys(_d.by_model||{}).length+' by_app='+Object.keys(_d.by_app||{}).length);
   var isToken=budgetMode==='token';
   var cur=t(isToken?'budgetTokenUnit':'budgetPriceUnit');
   var today=_bTodayTokens(),month=_bMonthTokens();
