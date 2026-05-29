@@ -12,32 +12,12 @@
 
 ---
 
-## 快速开始
-
-**无需安装，直接运行：**
-
-```bash
-# 双击即可
-TOKENBANK.bat
-
-# 或命令行启动
-python app.py
-```
-
-**打包为单文件 EXE（免 Python 环境）：**
-
-```bash
-python build.py    # 产出 dist/TOKENBANK.exe
-```
-
----
-
 ## 核心特性
 
 | 特性 | 说明 |
 |:---|:---|
 | **100% 本地** | 所有数据本地读取处理，不经过任何外部服务器 |
-| **开箱即用** | 单个 `app.py` 即完整应用，拷贝即用 |
+| **开箱即用** | 单个 `app.py` 即完整应用，也可打包为单个 `.exe`，拷贝即用 |
 | **多平台聚合** | 同时支持 Claude Code / Codex / Cline 会话数据 |
 | **精细计费** | 自定义模型单价，Input / Output / Cache Read 三维度 |
 | **时间段对比** | 一键预设（今天 vs 昨天、本周 vs 上周等），差异清晰呈现 |
@@ -116,6 +96,29 @@ python build.py    # 产出 dist/TOKENBANK.exe
 | gpt-5.5 | $5.00 | $30.00 | $0.50 |
 
 > 单价为 $/百万 Token，所有价格均可在设置中自定义。未匹配模型使用默认计费。
+
+---
+
+## 快速开始
+
+**方式一：直接使用 EXE（无需 Python 环境）**
+
+`dist/TOKENBANK.exe` 为单文件免安装版本，可直接拷贝到任意 Windows 电脑运行。
+
+**方式二：从源码运行**
+
+```bash
+pip install -r requirements.txt
+python app.py
+```
+
+也可双击 `TOKENBANK.bat` 启动（自动优先使用 pythonw 隐藏控制台窗口）。
+
+**方式三：自行打包 EXE**
+
+```bash
+python build.py    # 产出 dist/TOKENBANK.exe
+```
 
 ---
 

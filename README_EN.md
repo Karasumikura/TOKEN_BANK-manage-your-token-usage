@@ -12,32 +12,12 @@
 
 ---
 
-## Quick Start
-
-**No install needed — just run:**
-
-```bash
-# Double-click
-TOKENBANK.bat
-
-# Or from command line
-python app.py
-```
-
-**Build single-file EXE (no Python required):**
-
-```bash
-python build.py    # outputs dist/TOKENBANK.exe
-```
-
----
-
 ## Key Features
 
 | Feature | Description |
 |:---|:---|
 | **100% Local** | All data read and processed locally, never sent to any server |
-| **Ready to Use** | Single `app.py` is the complete app, copy and run |
+| **Ready to Use** | Single `app.py` is the complete app, or pack into a single `.exe` |
 | **Multi-Platform** | Unified dashboard for Claude Code / Codex / Cline sessions |
 | **Granular Pricing** | Custom model rates for Input / Output / Cache Read |
 | **Period Compare** | One-click presets (Today vs Yesterday, This Week vs Last Week, etc.) |
@@ -116,6 +96,29 @@ python build.py    # outputs dist/TOKENBANK.exe
 | gpt-5.5 | $5.00 | $30.00 | $0.50 |
 
 > Prices are $/1M tokens. Fully customizable in Settings. Unmatched models use default pricing.
+
+---
+
+## Quick Start
+
+**Option 1: Use the pre-built EXE (no Python required)**
+
+`dist/TOKENBANK.exe` is a single portable file. Copy it to any Windows PC and run directly.
+
+**Option 2: Run from source**
+
+```bash
+pip install -r requirements.txt
+python app.py
+```
+
+Or double-click `TOKENBANK.bat` (automatically uses pythonw to hide the console when available).
+
+**Option 3: Build your own EXE**
+
+```bash
+python build.py    # outputs dist/TOKENBANK.exe
+```
 
 ---
 
