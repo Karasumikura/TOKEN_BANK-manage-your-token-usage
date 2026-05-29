@@ -203,7 +203,7 @@ def load_cline_sessions():
         cache_create = t.get("cacheWrites", 0)
         cost = t.get("totalCost", 0.0)
         task_text = t.get("task", "")
-        summary = re.sub(r'^\s+|\s+$', '', task_text)[:80]
+        summary = re.sub(r'^\s+|\s+$', '', task_text)[:160]
         dt = datetime.fromtimestamp(ts_ms / 1000) if ts_ms else None
         date_str = dt.strftime("%Y-%m-%d") if dt else ""
         ts_str = dt.strftime("%Y-%m-%dT%H:%M:%S") if dt else ""
@@ -427,21 +427,43 @@ class Api:
                     break
         return json.dumps({"id": session_id, "messages": messages})
 
-    def get_heatmap(self):
+    def get_heatmap(self, start_date="", end_date=""):
         records = self.load_data()
-        heatmap = [[0] * 24 for _ in range(7)]
+        if start_date and end_date:
+            records = [r for r in records if r.get("date", "") and start_date <= r["date"] <= end_date]
+        # Determine if short range (<=7 days) -> date x hour, else weekday x hour
+        dates_set = set()
+        for r in records:
+            if r.get("date"):
+                dates_set.add(r["date"])
+        short_range = len(dates_set) <= 7 and start_date and end_date
+        if short_range:
+            sorted_dates = sorted(dates_set)
+            date_idx = {d: i for i, d in enumerate(sorted_dates)}
+            heatmap = [[0] * 24 for _ in range(len(sorted_dates))]
+            labels = sorted_dates
+        else:
+            heatmap = [[0] * 24 for _ in range(7)]
+            labels = []
         for r in records:
             ts = r.get("timestamp", "")
             if ts and len(ts) >= 13:
                 try:
                     dt = datetime.fromisoformat(ts)
-                    heatmap[dt.weekday()][dt.hour] += r["input"] + r["output"] + r["cache_read"]
+                    if short_range:
+                        row = date_idx.get(r.get("date", ""))
+                        if row is not None:
+                            heatmap[row][dt.hour] += r["input"] + r["output"] + r["cache_read"]
+                    else:
+                        heatmap[dt.weekday()][dt.hour] += r["input"] + r["output"] + r["cache_read"]
                 except (ValueError, IndexError):
                     pass
-        return json.dumps(heatmap)
+        return json.dumps({"heatmap": heatmap, "labels": labels})
 
-    def get_model_daily(self):
+    def get_model_daily(self, start_date="", end_date=""):
         records = self.load_data()
+        if start_date and end_date:
+            records = [r for r in records if r.get("date", "") and start_date <= r["date"] <= end_date]
         by_date_model = defaultdict(lambda: defaultdict(lambda: {"input": 0, "output": 0, "cache_read": 0, "cost": 0.0}))
         for r in records:
             if r["date"]:
@@ -452,18 +474,35 @@ class Api:
                 d["cost"] += r["cost"]
         result = []
         for date in sorted(by_date_model.keys()):
-            models = {m: dict(v) for m, v in by_date_model[date].items()}
+            models = {m: {**dict(v), "total": v["input"] + v["output"] + v["cache_read"]} for m, v in by_date_model[date].items()}
             result.append({"date": date, "models": models})
+        return json.dumps(result)
+
+    def get_model_hourly(self, date_str):
+        records = [r for r in self.load_data() if r.get("date") == date_str and r.get("timestamp")]
+        by_hour_model = defaultdict(lambda: defaultdict(lambda: {"input": 0, "output": 0, "cache_read": 0}))
+        for r in records:
+            ts = r["timestamp"]
+            hour = ts[11:13] if len(ts) >= 13 else "00"
+            d = by_hour_model[hour][r["model"]]
+            d["input"] += r["input"]
+            d["output"] += r["output"]
+            d["cache_read"] += r["cache_read"]
+        result = []
+        for hour in sorted(by_hour_model.keys()):
+            models = {m: {"total": v["input"] + v["output"] + v["cache_read"]} for m, v in by_hour_model[hour].items()}
+            result.append({"hour": hour + ":00", "models": models})
         return json.dumps(result)
 
     def toggle_mini(self, on):
         global _app_window
         if _app_window:
-            _app_window.on_top = (on == "1")
             if on == "1":
+                _app_window.min_size = (320, 240)
                 _app_window.resize(420, 320)
             else:
                 _app_window.resize(1280, 800)
+                _app_window.min_size = (960, 600)
         return json.dumps({"ok": True})
 
     def get_pricing_data(self):
@@ -551,7 +590,7 @@ class Api:
                         "session": r["session"], "summary": r.get("summary", ""),
                         "input": r["input"], "output": r["output"],
                         "cache_read": r["cache_read"], "cache_create": r.get("cache_create", 0),
-                        "cost": r["cost"]} for r in recent]
+                        "cost": r["cost"], "count": r.get("count", 1)} for r in recent]
         return {
             "summary": {
                 "total_input": sum(a["input"] for a in by_app.values()),
@@ -654,7 +693,7 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
 .topbar .actions{display:flex;gap:8px;align-items:center}
 .sidebar{background:var(--surface);box-shadow:1px 0 3px rgba(0,0,0,.06);padding:16px 12px;display:flex;flex-direction:column;gap:2px;overflow-y:auto;animation:slideRight .5s var(--ease-out-expo) .1s both}
 .nav-item{padding:10px 14px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:500;color:var(--dim);display:flex;align-items:center;gap:10px;transition:all .25s var(--ease-spring);user-select:none;animation:fadeSlideLeft .4s var(--ease-out-back) both}
-.nav-item:nth-child(1){animation-delay:.15s}.nav-item:nth-child(2){animation-delay:.2s}.nav-item:nth-child(3){animation-delay:.25s}.nav-item:nth-child(4){animation-delay:.3s}.nav-item:nth-child(5){animation-delay:.35s}.nav-item:nth-child(7){animation-delay:.4s}
+.nav-item:nth-child(1){animation-delay:.15s}.nav-item:nth-child(2){animation-delay:.2s}.nav-item:nth-child(3){animation-delay:.25s}.nav-item:nth-child(4){animation-delay:.3s}.nav-item:nth-child(5){animation-delay:.35s}.nav-item:nth-child(6){animation-delay:.4s}.nav-item:nth-child(7){animation-delay:.45s}.nav-item:nth-child(9){animation-delay:.5s}
 .nav-item:hover{background:var(--surface2);color:var(--text);transform:translateX(4px);padding-left:18px}
 .nav-item:active{transform:translateX(2px) scale(.97)}
 .nav-item.active{background:var(--indigo-bg);color:var(--indigo);box-shadow:inset 3px 0 0 var(--indigo)}
@@ -806,8 +845,37 @@ tr:hover td{background:rgba(255,255,255,.05)}
 .export-btn{background:transparent;border:1px solid rgba(127,127,127,.15);color:var(--muted);padding:4px 10px;border-radius:6px;font-size:10px;font-weight:600;cursor:pointer;font-family:inherit;transition:all .25s var(--ease-spring);letter-spacing:.3px}
 .export-btn:hover{border-color:var(--green);color:var(--green);transform:translateY(-1px)}
 
+/* Budget section */
+.budget-hero{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px;animation:fadeSlideUp .5s var(--ease-out-back) both}
+.budget-ring-card{background:var(--surface);border-radius:16px;padding:28px 24px;display:flex;align-items:center;gap:24px;box-shadow:0 2px 12px rgba(0,0,0,.06);transition:transform .35s var(--ease-spring),box-shadow .35s ease;position:relative;overflow:hidden}
+.budget-ring-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;border-radius:16px 16px 0 0}
+.budget-ring-card:nth-child(1)::before{background:linear-gradient(90deg,var(--indigo),var(--cyan))}
+.budget-ring-card:nth-child(2)::before{background:linear-gradient(90deg,var(--purple),var(--pink))}
+.budget-ring-card:hover{transform:translateY(-4px);box-shadow:0 8px 24px rgba(0,0,0,.1)}
+.budget-ring-wrap{position:relative;width:120px;height:120px;flex-shrink:0}
+.budget-ring{width:100%;height:100%;transform:rotate(-90deg)}
+.budget-ring-bg{fill:none;stroke:var(--surface2);stroke-width:8}
+.budget-ring-fill{fill:none;stroke-width:8;stroke-linecap:round;stroke-dasharray:326.73;stroke-dashoffset:326.73;transition:stroke-dashoffset 1.2s cubic-bezier(.4,0,.2,1),stroke .3s ease}
+.budget-ring-center{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center}
+.budget-ring-value{font-size:22px;font-weight:800;line-height:1}
+.budget-ring-label{font-size:10px;color:var(--muted);margin-top:2px}
+.budget-ring-info{flex:1;min-width:0}
+.budget-ring-title{font-size:13px;font-weight:600;color:var(--text)}
+.budget-ring-amount{font-size:28px;font-weight:800;margin:6px 0;letter-spacing:-.5px}
+.budget-ring-sub{font-size:11px;color:var(--muted);line-height:1.4}
+.budget-form{display:flex;flex-direction:column;gap:16px}
+.budget-form-row{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.budget-form-row label{font-size:13px;font-weight:600;min-width:100px}
+.budget-input-group{display:flex;align-items:center;background:var(--surface2);border:1px solid rgba(127,127,127,.15);border-radius:8px;overflow:hidden;transition:border-color .25s ease,box-shadow .25s ease}
+.budget-input-group:focus-within{border-color:var(--indigo);box-shadow:0 0 0 3px rgba(99,102,241,.15)}
+.budget-currency{padding:8px 10px;font-size:14px;font-weight:600;color:var(--muted);background:rgba(127,127,127,.06)}
+.budget-input-group input{width:100px;padding:8px 12px;background:transparent;border:none;color:var(--text);font-size:14px;font-family:inherit;outline:none}
+.budget-hint{font-size:11px;color:var(--muted)}
+.budget-form-actions{display:flex;gap:8px;margin-top:4px}
+.budget-status-ok{color:var(--green)}.budget-status-warn{color:var(--amber)}.budget-status-over{color:var(--red)}
+
 /* Mini mode */
-.mini .sidebar,.mini .topbar .actions .budget-warn,.mini .content>.section:not(#s-mini){display:none!important}
+.mini .sidebar,.mini .topbar .actions #budgetWarn,.mini .topbar .actions .budget-btn,.mini .content>.section:not(#s-mini){display:none!important}
 .mini .topbar h1{font-size:14px}
 .mini .content{padding:12px}
 #s-mini{display:none}
@@ -828,7 +896,8 @@ tr:hover td{background:rgba(255,255,255,.05)}
   <div class="topbar">
     <h1>TOKEN<span>BANK</span></h1>
     <div class="actions">
-      <span id="budgetWarn"></span>
+      <span id="budgetWarn" onclick="jumpBudget()" style="cursor:pointer" title="Click to open budget settings"></span>
+      <button class="btn btn-ghost btn-sm budget-btn" onclick="jumpBudget()" title="Budget Settings" style="font-size:13px;padding:4px 8px">&#128176;</button>
       <span id="status" style="font-size:11px;color:var(--muted)"></span>
       <button class="btn btn-ghost btn-sm" id="reloadBtn" onclick="reload()">Reload</button>
       <button class="btn btn-ghost btn-sm" id="miniBtn" onclick="toggleMini()" title="Mini mode">Mini</button>
@@ -841,6 +910,7 @@ tr:hover td{background:rgba(255,255,255,.05)}
     <div class="nav-item" data-s="sessions"><span class="icon">&#128196;</span>Sessions</div>
     <div class="nav-item" data-s="compare"><span class="icon">&#9878;</span>Compare</div>
     <div class="nav-item" data-s="report"><span class="icon">&#128203;</span>Report</div>
+    <div class="nav-item" data-s="budget"><span class="icon">&#128176;</span>Budget</div>
     <div style="flex:1"></div>
     <div class="nav-item" data-s="settings"><span class="icon">&#9881;</span>Settings</div>
     <div style="padding:8px 14px;font-size:10px;color:var(--muted)">
@@ -890,6 +960,7 @@ tr:hover td{background:rgba(255,255,255,.05)}
         <div class="panel"><h3 data-i18n="dailyCost"><span class="dot"></span>Daily Cost</h3><div class="chart-box"><canvas id="cDailyCost"></canvas></div></div>
       </div>
       <div class="panel"><h3 data-i18n="dailyDetail"><span class="dot"></span>Daily Detail<button class="export-btn" style="margin-left:auto" onclick="exportCSV('daily')">CSV</button></h3><div class="table-scroll"><table id="tDaily"></table></div></div>
+      <div class="panel"><h3 data-i18n="modelRanking"><span class="dot" style="background:var(--amber)"></span>Model Ranking</h3><div class="chart-box"><canvas id="cModelRanking"></canvas></div></div>
       <div class="grid2">
         <div class="panel"><h3 data-i18n="heatmap"><span class="dot" style="background:var(--purple)"></span>Heatmap</h3><div class="heatmap-wrap"><canvas id="cHeatmap" class="heatmap-canvas" width="600" height="180"></canvas></div><div class="heatmap-legend"><span data-i18n="low">Low</span><div class="bar"></div><span data-i18n="high">High</span></div></div>
         <div class="panel"><h3 data-i18n="modelTrends"><span class="dot" style="background:var(--pink)"></span>Model Trends</h3><div class="chart-box"><canvas id="cModelTrends"></canvas></div></div>
@@ -946,6 +1017,100 @@ tr:hover td{background:rgba(255,255,255,.05)}
       </div>
     </div>
 
+    <!-- Budget -->
+    <div class="section" id="s-budget">
+      <div class="panel" style="margin-bottom:16px">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <h3><span class="dot" style="background:var(--indigo)"></span><span data-i18n="budgetTitle">Budget Management</span></h3>
+          <div class="toggle-group" id="budgetModeToggle">
+            <button class="active" onclick="setBudgetMode('token')" data-i18n="budgetModeToken">Token Budget</button>
+            <button onclick="setBudgetMode('price')" data-i18n="budgetModePrice">Price Budget</button>
+          </div>
+        </div>
+      </div>
+      <div class="budget-hero">
+        <div class="budget-ring-card" id="budgetDailyCard">
+          <div class="budget-ring-wrap">
+            <svg class="budget-ring" viewBox="0 0 120 120">
+              <circle class="budget-ring-bg" cx="60" cy="60" r="52" />
+              <circle class="budget-ring-fill" id="budgetDailyRing" cx="60" cy="60" r="52" />
+            </svg>
+            <div class="budget-ring-center">
+              <div class="budget-ring-value" id="budgetDailyPct">--</div>
+              <div class="budget-ring-label" data-i18n="budgetToday">Today</div>
+            </div>
+          </div>
+          <div class="budget-ring-info">
+            <div class="budget-ring-title" data-i18n="budgetDaily">Daily Budget</div>
+            <div class="budget-ring-amount" id="budgetDailyAmount">$0.00</div>
+            <div class="budget-ring-sub" id="budgetDailySub"></div>
+          </div>
+        </div>
+        <div class="budget-ring-card" id="budgetMonthlyCard">
+          <div class="budget-ring-wrap">
+            <svg class="budget-ring" viewBox="0 0 120 120">
+              <circle class="budget-ring-bg" cx="60" cy="60" r="52" />
+              <circle class="budget-ring-fill" id="budgetMonthlyRing" cx="60" cy="60" r="52" />
+            </svg>
+            <div class="budget-ring-center">
+              <div class="budget-ring-value" id="budgetMonthlyPct">--</div>
+              <div class="budget-ring-label" data-i18n="budgetThisMonth">This Month</div>
+            </div>
+          </div>
+          <div class="budget-ring-info">
+            <div class="budget-ring-title" data-i18n="budgetMonthly">Monthly Budget</div>
+            <div class="budget-ring-amount" id="budgetMonthlyAmount">$0.00</div>
+            <div class="budget-ring-sub" id="budgetMonthlySub"></div>
+          </div>
+        </div>
+      </div>
+      <div class="grid2">
+        <div class="panel">
+          <h3><span class="dot" style="background:var(--indigo)"></span><span data-i18n="budgetByModel">By Model</span></h3>
+          <div class="table-scroll"><table id="tBudgetModel"></table></div>
+        </div>
+        <div class="panel">
+          <h3><span class="dot" style="background:var(--cyan)"></span><span data-i18n="budgetByApp">By App</span></h3>
+          <div class="table-scroll"><table id="tBudgetApp"></table></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h3><span class="dot" style="background:var(--green)"></span><span data-i18n="budgetPerApp">Per-App Budget</span></h3>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="budgetAppDesc">Monthly limit per application (0 = disabled)</div>
+        <div class="table-scroll"><table id="tBudgetAppDetail"></table></div>
+      </div>
+      <div class="panel">
+        <h3><span class="dot" style="background:var(--pink)"></span><span data-i18n="budgetPerModel">Per-Model Budget</span></h3>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="budgetModelDesc">Monthly limit per model (0 = disabled)</div>
+        <div class="table-scroll"><table id="tBudgetModelDetail"></table></div>
+      </div>
+      <div class="panel">
+        <h3><span class="dot" style="background:var(--amber)"></span><span data-i18n="budgetTitle">Budget Settings</span></h3>
+        <div class="budget-form">
+          <div class="budget-form-row">
+            <label data-i18n="budgetDaily">Daily Budget</label>
+            <div class="budget-input-group">
+              <span class="budget-currency" id="budgetCurD">$</span>
+              <input type="number" id="budgetDailyInput2" min="0" step="1" value="0" onchange="setBudgetFromForm()">
+            </div>
+            <span class="budget-hint" id="budgetHintD" data-i18n="budgetSetDesc">Set spending limits (0 = disabled)</span>
+          </div>
+          <div class="budget-form-row">
+            <label data-i18n="budgetMonthly">Monthly Budget</label>
+            <div class="budget-input-group">
+              <span class="budget-currency" id="budgetCurM">$</span>
+              <input type="number" id="budgetMonthlyInput2" min="0" step="1" value="0" onchange="setBudgetFromForm()">
+            </div>
+            <span class="budget-hint" id="budgetHintM" data-i18n="budgetSetDesc">Set spending limits (0 = disabled)</span>
+          </div>
+          <div class="budget-form-actions">
+            <button class="btn btn-primary btn-sm" onclick="setBudgetFromForm()" data-i18n="budgetSave">Save Budget</button>
+            <button class="btn btn-ghost btn-sm" onclick="resetBudget()" data-i18n="budgetReset">Reset</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Mini mode -->
     <div class="section" id="s-mini">
       <div class="mini-cards" id="miniCards"></div>
@@ -978,14 +1143,6 @@ tr:hover td{background:rgba(255,255,255,.05)}
           <div style="display:flex;align-items:center;justify-content:space-between">
             <div><div style="font-size:13px;font-weight:600" data-i18n="refreshInterval">Refresh Interval</div><div style="font-size:11px;color:var(--muted);margin-top:2px" data-i18n="refreshIntervalDesc">Time interval between auto-refreshes (seconds)</div></div>
             <div class="toggle-group" id="intervalToggle"><button onclick="setRefreshInterval(15)">15s</button><button class="active" onclick="setRefreshInterval(30)">30s</button><button onclick="setRefreshInterval(60)">60s</button><button onclick="setRefreshInterval(120)">120s</button></div>
-          </div>
-          <div style="display:flex;align-items:center;justify-content:space-between">
-            <div><div style="font-size:13px;font-weight:600" data-i18n="dailyBudget">Daily Budget</div><div style="font-size:11px;color:var(--muted);margin-top:2px" data-i18n="dailyBudgetDesc">USD daily spending limit (0 = disabled)</div></div>
-            <input type="number" id="dailyBudgetInput" min="0" step="1" value="0" style="width:80px;background:var(--surface2);border:1px solid rgba(127,127,127,.15);color:var(--text);padding:5px 8px;border-radius:6px;font-size:12px;font-family:inherit" onchange="setBudget()">
-          </div>
-          <div style="display:flex;align-items:center;justify-content:space-between">
-            <div><div style="font-size:13px;font-weight:600" data-i18n="monthlyBudget">Monthly Budget</div><div style="font-size:11px;color:var(--muted);margin-top:2px" data-i18n="monthlyBudgetDesc">USD monthly spending limit (0 = disabled)</div></div>
-            <input type="number" id="monthlyBudgetInput" min="0" step="1" value="0" style="width:80px;background:var(--surface2);border:1px solid rgba(127,127,127,.15);color:var(--text);padding:5px 8px;border-radius:6px;font-size:12px;font-family:inherit" onchange="setBudget()">
           </div>
         </div>
       </div>
@@ -1021,6 +1178,11 @@ function fmt(n){
   if(n>=1e9)return(n/1e9).toFixed(1)+'B';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return String(n);
 }
 function fmtC(c){if(c===0)return'$0.00';if(c<.01)return'$'+c.toFixed(4);return'$'+c.toFixed(2)}
+function truncW(s,maxW){
+  if(!s)return'';var w=0,i=0;var len=s.length;
+  while(i<len){var c=s.charCodeAt(i);w+=(c>0x7f)?2:1;if(w>maxW)break;i++}
+  return i<len?s.substring(0,i)+'...':s;
+}
 function pct(a,b){if(!b)return'-';return((a-b)/b*100).toFixed(1)+'%'}
 function pctClass(a,b){if(!b)return'same';return a>b?'up':'down'}
 
@@ -1029,7 +1191,7 @@ let lang=(function(){try{return localStorage.getItem('tb-lang')||'zh'}catch(e){r
 numFmt=(function(){try{return localStorage.getItem('tb-numfmt')||(lang==='zh'?'cn':'en')}catch(e){return 'cn'}})();
 const T={
   en:{
-    overview:'Overview',daily:'Usage Report',projects:'Projects',sessions:'Sessions',compare:'Compare',
+    overview:'Overview',daily:'Trends',budget:'Budget',projects:'Projects',sessions:'Sessions',compare:'Compare',
     appLabel:'Claude Code + Codex',records:'records',reload:'Reload',loading:'Loading...',
     loaded:'Loaded',loadedSuff:'records',
     sRecords:'Records',sInput:'Input Tokens',sOutput:'Output Tokens',sCache:'Cache Read',sCost:'Est. Cost',sCacheRate:'Cache Rate',
@@ -1062,16 +1224,25 @@ const T={
     efficiency:'Efficiency',forecast:'Cost Forecast',
     tokPerMsg:'Tokens/Msg',costPerMsg:'Cost/Msg',costPer1k:'Cost/1K Tokens',
     projMonthCost:'Projected monthly cost',basedOn:'Based on',
-    heatmap:'Usage Heatmap',modelTrends:'Model Trends',
+    heatmap:'Usage Heatmap',modelTrends:'Model Trends',modelRanking:'Model Token Ranking',
     low:'Low',high:'High',mo:'Mo',tu:'Tu',we:'We',th:'Th',fr:'Fr',sa:'Sa',su:'Su',
     report:'Usage Report',copyReport:'Copy',last7d:'Last 7 Days',last30d:'Last 30 Days',allTime:'All Time',
     restoreFull:'Restore Full View',miniMode:'Mini',
     reportTitle:'TOKENBANK Usage Report',reportPeriod:'Period',reportTotal:'Total',reportAvg:'Daily Avg',
     reportTopModels:'Top Models',reportTopProjects:'Top Projects',
     exported:'Exported',noData:'No data',
+    budgetTitle:'Budget Management',budgetDaily:'Daily Budget',budgetMonthly:'Monthly Budget',
+    budgetSetDesc:'Set spending limits (0 = disabled)',budgetSave:'Save Budget',budgetReset:'Reset',
+    budgetToday:'Today',budgetThisMonth:'This Month',budgetRemaining:'Remaining',budgetSpent:'Spent',
+    budgetProgress:'Usage Progress',budgetByModel:'Cost by Model',budgetByApp:'Cost by App',
+    budgetNoLimit:'No limit set',budgetExceeded:'Exceeded!',budgetWarning:'Warning: approaching limit',
+    budgetModeToken:'Token Budget',budgetModePrice:'Price Budget',budgetTokenUnit:'tokens',budgetPriceUnit:'USD',
+    budgetPerApp:'Per-App Budget',budgetPerModel:'Per-Model Budget',budgetLimit:'Limit',budgetUsed:'Used',budgetPct:'Usage',
+    budgetAppDesc:'Monthly limit per application (0 = disabled)',budgetModelDesc:'Monthly limit per model (0 = disabled)',
+    budgetNoAppLimit:'No per-app limits set',budgetNoModelLimit:'No per-model limits set',
   },
   zh:{
-    overview:'概览',daily:'使用报告',projects:'项目',sessions:'会话',compare:'对比',
+    overview:'概览',daily:'趋势分析',budget:'预算',projects:'项目',sessions:'会话',compare:'对比',
     appLabel:'Claude Code + Codex',records:'条记录',reload:'刷新',loading:'加载中...',
     loaded:'已加载',loadedSuff:'条记录',
     sRecords:'记录数',sInput:'输入Token',sOutput:'输出Token',sCache:'缓存读取',sCost:'预估费用',sCacheRate:'缓存率',
@@ -1104,13 +1275,22 @@ const T={
     efficiency:'效率指标',forecast:'费用预测',
     tokPerMsg:'Token/消息',costPerMsg:'费用/消息',costPer1k:'费用/千Token',
     projMonthCost:'预计本月费用',basedOn:'基于',
-    heatmap:'使用热力图',modelTrends:'模型趋势',
+    heatmap:'使用热力图',modelTrends:'模型趋势',modelRanking:'模型Token总量排行',
     low:'低',high:'高',mo:'一',tu:'二',we:'三',th:'四',fr:'五',sa:'六',su:'日',
     report:'使用报告',copyReport:'复制',last7d:'近7天',last30d:'近30天',allTime:'全部',
     restoreFull:'恢复完整视图',miniMode:'迷你',
     reportTitle:'TOKENBANK 使用报告',reportPeriod:'时段',reportTotal:'合计',reportAvg:'日均',
     reportTopModels:'热门模型',reportTopProjects:'热门项目',
     exported:'已导出',noData:'暂无数据',
+    budgetTitle:'预算管理',budgetDaily:'每日预算',budgetMonthly:'每月预算',
+    budgetSetDesc:'设置费用上限（0 = 不启用）',budgetSave:'保存预算',budgetReset:'重置',
+    budgetToday:'今日',budgetThisMonth:'本月',budgetRemaining:'剩余',budgetSpent:'已花费',
+    budgetProgress:'使用进度',budgetByModel:'按模型费用',budgetByApp:'按应用费用',
+    budgetNoLimit:'未设置限额',budgetExceeded:'已超支！',budgetWarning:'警告：即将达到限额',
+    budgetModeToken:'Token 预算',budgetModePrice:'费用预算',budgetTokenUnit:'Token',budgetPriceUnit:'美元',
+    budgetPerApp:'按应用预算',budgetPerModel:'按模型预算',budgetLimit:'限额',budgetUsed:'已用',budgetPct:'使用率',
+    budgetAppDesc:'每个应用的月度限额（0 = 不限制）',budgetModelDesc:'每个模型的月度限额（0 = 不限制）',
+    budgetNoAppLimit:'未设置按应用限额',budgetNoModelLimit:'未设置按模型限额',
   }
 };
 function t(k){return(T[lang]&&T[lang][k])||T.en[k]||k}
@@ -1138,15 +1318,23 @@ function setRefreshInterval(sec){
   syncSettingsUI();
   startAutoRefresh();
 }
+function _refreshCurrentView(){
+  var s=$('#dStart').value,e=$('#dEnd').value;
+  if(s&&e&&s===e){pywebview.api.get_hourly(s).then(function(r){renderHourly(JSON.parse(r))})}
+  else if(s&&e){pywebview.api.get_filtered(s,e).then(function(r){renderDaily(JSON.parse(r))})}
+  else{renderDaily(fullData)}
+}
 function startAutoRefresh(){
   if(_autoRefreshTimer){clearInterval(_autoRefreshTimer);_autoRefreshTimer=null}
   if(autoRefreshEnabled&&refreshIntervalSec>0){
     _autoRefreshTimer=setInterval(function(){
+      _animEnabled=false;
       pywebview.api.reload().then(function(r){
         var d=JSON.parse(r);fullData=d;
-        render(d);renderDaily(d);renderHeatmap();
+        render(d);_refreshCurrentView();renderModelTrends();checkBudget();if($('#s-budget.active'))renderBudget();
         if(d.daily.length){allDates=d.daily.map(function(x){return x.date})}
         $('#status').textContent=t('loaded')+' '+d.summary.total_records+' '+t('loadedSuff');
+        _animEnabled=true;
       });
     },refreshIntervalSec*1000);
   }
@@ -1157,6 +1345,10 @@ function syncSettingsUI(){
   var nt=$('#numFmtToggle');if(nt)nt.querySelectorAll('button').forEach(function(b){b.classList.toggle('active',b.textContent===(numFmt==='cn'?'万/亿':'K/M'))});
   var ar=$('#autoRefreshToggle');if(ar)ar.querySelectorAll('button').forEach(function(b){b.classList.toggle('active',b.textContent.toLowerCase()===(autoRefreshEnabled?'on':'off'))});
   var it=$('#intervalToggle');if(it)it.querySelectorAll('button').forEach(function(b){b.classList.toggle('active',b.textContent===refreshIntervalSec+'s')});
+  var bm=$('#budgetModeToggle');if(bm)bm.querySelectorAll('button').forEach(function(b){
+    var isToken=budgetMode==='token';
+    b.classList.toggle('active',(isToken&&b.dataset.i18n==='budgetModeToken')||(!isToken&&b.dataset.i18n==='budgetModePrice'));
+  });
 }
 function initSettings(){
   var savedTheme=lsGet('tb-theme','light');
@@ -1164,10 +1356,11 @@ function initSettings(){
   numFmt=lsGet('tb-numfmt',lang==='zh'?'cn':'en');
   autoRefreshEnabled=lsGet('tb-autorefresh','on')==='on';
   refreshIntervalSec=parseInt(lsGet('tb-refreshinterval','30'),10)||30;
+  budgetMode=lsGet('tb-budget-mode','token');
   budgetDaily=parseFloat(lsGet('tb-budget-daily','0'))||0;
   budgetMonthly=parseFloat(lsGet('tb-budget-monthly','0'))||0;
-  var dbi=$('#dailyBudgetInput');if(dbi)dbi.value=budgetDaily;
-  var mbi=$('#monthlyBudgetInput');if(mbi)mbi.value=budgetMonthly;
+  _loadBudgetMaps();
+  syncBudgetInputs();
   syncSettingsUI();
   applyLang();
 }
@@ -1187,17 +1380,19 @@ function applyLang(){
   });
   var appL=$('#appLabel');if(appL)appL.textContent=t('appLabel');
   var rBtn=$('#reloadBtn');if(rBtn)rBtn.textContent=t('reload');
-  if(fullData){render(fullData);renderDaily(fullData);renderHeatmap()}
+  if(fullData){render(fullData);_refreshCurrentView();renderHeatmap();renderModelTrends()}
 }
 
 // ── Chart helpers ──
+var _animEnabled=true;
 function kill(k){if(charts[k]){charts[k].destroy();delete charts[k]}}
 const _easeSpring='cubicBezier(.34,1.56,.64,1)';
+function _anim(dur,delayFn){return _animEnabled?{duration:dur,easing:_easeSpring,delay:delayFn}:{duration:0}}
 function bar(k,labels,datasets,stacked=true,opts={}){
   kill(k);const ctx=document.getElementById(k);if(!ctx)return;
   charts[k]=new Chart(ctx,{type:'bar',data:{labels,datasets},options:{
     responsive:true,maintainAspectRatio:false,
-    animation:{duration:800,easing:_easeSpring,delay:function(c){return c.dataIndex*40+c.datasetIndex*100}},
+    animation:_anim(800,function(c){return c.dataIndex*40+c.datasetIndex*100}),
     plugins:{legend:{display:datasets.length>1,labels:{color:'#a1a1aa',font:{size:10},boxWidth:10,padding:8}}},
     scales:{x:{stacked,ticks:{color:'#71717a',font:{size:9},maxRotation:45},grid:{display:false}},
             y:{stacked,ticks:{color:'#71717a',font:{size:9},callback:v=>fmt(v)},grid:{color:'rgba(63,63,70,.3)'}},
@@ -1207,7 +1402,7 @@ function line(k,labels,datasets,opts={}){
   kill(k);const ctx=document.getElementById(k);if(!ctx)return;
   charts[k]=new Chart(ctx,{type:'line',data:{labels,datasets},options:{
     responsive:true,maintainAspectRatio:false,
-    animation:{duration:1000,easing:'easeOutQuart',delay:function(c){return c.dataIndex*30}},
+    animation:_animEnabled?{duration:1000,easing:'easeOutQuart',delay:function(c){return c.dataIndex*30}}:{duration:0},
     plugins:{legend:{display:datasets.length>1,labels:{color:'#a1a1aa',font:{size:10},boxWidth:10,padding:8}}},
     scales:{x:{ticks:{color:'#71717a',font:{size:9},maxRotation:45},grid:{display:false}},
             y:{ticks:{color:'#71717a',font:{size:9},callback:v=>fmt(v)},grid:{color:'rgba(63,63,70,.3)'}},
@@ -1221,7 +1416,7 @@ function doughnut(k,labels,data){
     if(!ctx.parentElement)return;
     charts[k]=new Chart(ctx,{type:'doughnut',data:{labels,datasets:[{data,backgroundColor:bg,borderWidth:0}]},
       options:{responsive:true,maintainAspectRatio:false,cutout:'65%',
-        animation:{animateRotate:true,animateScale:true,duration:1200,easing:'easeOutQuart'},
+        animation:{animateRotate:_animEnabled,animateScale:_animEnabled,duration:_animEnabled?1200:0,easing:'easeOutQuart'},
         plugins:{legend:{position:'right',labels:{color:'#a1a1aa',font:{size:10},boxWidth:8,padding:6}}}}});
   },80);
 }
@@ -1236,6 +1431,7 @@ function mkT(el,hdrs,rows){
   el.innerHTML=h;
 }
 function badge(a){return`<span class="badge b-${a}">${a.toUpperCase()}</span>`}
+function escH(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 
 // ── Render ──
 function render(d){
@@ -1280,11 +1476,20 @@ function render(d){
     const recR=d.recent.map(r=>{
       const ts=r.timestamp?r.timestamp.replace('T',' ').slice(0,16):'';
       const sm=r.summary?r.summary.replace(/^[\s﻿\xA0]+|[\s﻿\xA0]+$/g,''):'';
-      const label=sm?sm.substring(0,100)+(sm.length>100?'...':''):r.session.substring(0,12)+'...';
-      const ti=(r.input||0)+(r.cache_read||0)+(r.cache_create||0);
-      return[ts,badge(r.app),r.model,fmt(ti),fmt(r.input),fmt(r.output),fmtC(r.cost),label]
+      const label=sm?truncW(sm,100):r.session.substring(0,12)+'...';
+      const cnt=r.count||1;
+      const isSess=cnt>1;
+      // Show per-message averages for session-level records
+      const inp=isSess?Math.round((r.input||0)/cnt):(r.input||0);
+      const outp=isSess?Math.round((r.output||0)/cnt):(r.output||0);
+      const crd=isSess?Math.round((r.cache_read||0)/cnt):(r.cache_read||0);
+      const ti=inp+crd+(isSess?Math.round((r.cache_create||0)/cnt):(r.cache_create||0));
+      const cost=isSess?(r.cost||0)/cnt:(r.cost||0);
+      const sessLabel=lang==='zh'?'会话':'session';
+      const sessTag=isSess?'<span class="badge" style="font-size:9px;padding:1px 4px;margin-left:4px;background:rgba(251,191,36,.2);color:#fbbf24">'+sessLabel+' ('+cnt+)</span>':'';
+      return[ts,badge(r.app)+sessTag,r.model,fmt(ti),fmt(inp),fmt(outp),fmtC(cost),label]
     });
-    mkT($('#tRecent'),[t('thTime'),t('thApp'),t('thModel'),t('thTotalInput'),t('thNonCacheInput'),t('thOutput'),t('thCost'),t('thSummary')],recR);
+    mkT($('#tRecent'),[t('thTime'),t('thApp'),t('thModel'),t('thTotalInput'),t('thNonCacheInput'),t('thOutput'),lang==='zh'?'平均费用':'Avg Cost',t('thSummary')],recR);
   }
 
   // Projects
@@ -1294,7 +1499,7 @@ function render(d){
   // Sessions
   const sessR=d.sessions.map(s=>{
     const sm=s.summary?s.summary.replace(/^[\s﻿\xA0]+|[\s﻿\xA0]+$/g,''):'';
-    const label=sm?sm.substring(0,80)+(sm.length>80?'...':''):s.id.substring(0,16)+'...';
+    const label=sm?truncW(sm,80):s.id.substring(0,16)+'...';
     return[fmt(s.total),badge(s.app),s.model,s.date,fmt(s.count),fmt(s.input),fmt(s.output),fmtC(s.cost),label]
   });
   mkT($('#tSession'),[t('thTotal'),t('thApp'),t('thModel'),t('thDate'),t('thMsgs'),t('thInput'),t('thOutput'),t('thCost'),t('thSession')],sessR);
@@ -1352,6 +1557,8 @@ function renderDaily(data){
   fullData=data;
   if(data.summary)renderDailyCards(data.summary);
   const dd=data.daily;
+  if(!dd.length)return;
+  const startDate=dd[0].date,endDate=dd[dd.length-1].date;
   const dates=dd.map(x=>x.date.slice(5));
   line('cDailyToken',dates,[
     {label:t('input'),data:dd.map(x=>x.input),borderColor:'#60a5fa',backgroundColor:'rgba(96,165,250,.1)',fill:true},
@@ -1363,6 +1570,11 @@ function renderDaily(data){
   ]);
   const rows=dd.map(d=>[d.date,fmt(d.count),fmt(d.input),fmt(d.output),fmt(d.cache_read),fmt(d.total),fmtC(d.cost)]);
   mkT($('#tDaily'),[t('thDate'),t('thMsgs'),t('thInput'),t('thOutput'),t('thCache'),t('thTotal'),t('thCost')],rows);
+  renderHeatmap(startDate,endDate);
+  pywebview.api.get_model_daily(startDate,endDate).then(function(r){
+    var mdata=JSON.parse(r);
+    renderModelRanking(mdata,function(d){return d.date.slice(5)});
+  });
   var detail=$$('#s-daily .panel h3[data-i18n]');
   detail.forEach(function(el){if(el.dataset.i18n==='dailyDetail'){var d=el.querySelector('.dot');if(d&&d.nextSibling)d.nextSibling.textContent=t('dailyDetail')}});
 }
@@ -1390,6 +1602,11 @@ function renderHourly(data){
   ]);
   var rows=hh.map(h=>[h.hour,fmt(h.count),fmt(h.input),fmt(h.output),fmt(h.cache_read),fmt(h.total),fmtC(h.cost)]);
   mkT($('#tDaily'),[t('thHour'),t('thMsgs'),t('thInput'),t('thOutput'),t('thCache'),t('thTotal'),t('thCost')],rows);
+  renderHeatmap(data.date,data.date);
+  pywebview.api.get_model_hourly(data.date).then(function(r){
+    var mdata=JSON.parse(r);
+    renderModelRanking(mdata,function(d){return d.hour});
+  });
   var detail=$$('#s-daily .panel h3[data-i18n]');
   detail.forEach(function(el){if(el.dataset.i18n==='dailyDetail'){var d=el.querySelector('.dot');if(d&&d.nextSibling)d.nextSibling.textContent=lang==='zh'?'逐时详情':'Hourly Detail'}});
 }
@@ -1471,7 +1688,7 @@ function presetCompare(mode){
   }
   doCompare();
 }
-function fmtD(d){return d.toISOString().slice(0,10)}
+function fmtD(d){return d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2)}
 
 // ── Nav ──
 $$('.nav-item').forEach(n=>n.addEventListener('click',function(){
@@ -1482,6 +1699,7 @@ $$('.nav-item').forEach(n=>n.addEventListener('click',function(){
   section.classList.add('active');
   if(n.dataset.s==='settings')loadPricingEditor();
   if(n.dataset.s==='compare')presetCompare('day');
+  if(n.dataset.s==='budget')renderBudget();
 }));
 
 // ── Pricing editor ──
@@ -1538,35 +1756,206 @@ function resetPricing(){
 }
 
 // ── Budget ──
-var budgetDaily=0,budgetMonthly=0;
+var budgetDaily=0,budgetMonthly=0,budgetMode='token';
+var budgetAppModels={};var budgetModelModels={};
+function jumpBudget(){
+  $$('.nav-item').forEach(function(x){x.classList.remove('active')});
+  $$('.section').forEach(function(x){x.classList.remove('active')});
+  var ni=document.querySelector('.nav-item[data-s="budget"]');
+  if(ni)ni.classList.add('active');
+  var sec=$('#s-budget');if(sec)sec.classList.add('active');
+  renderBudget();
+}
+function syncBudgetInputs(){
+  var d2=$('#budgetDailyInput2'),m2=$('#budgetMonthlyInput2');
+  if(d2)d2.value=budgetDaily;if(m2)m2.value=budgetMonthly;
+}
+function setBudgetMode(mode){
+  budgetMode=mode;lsSet('tb-budget-mode',mode);
+  var btns=$('#budgetModeToggle').querySelectorAll('button');
+  btns.forEach(function(b){b.classList.toggle('active',b.textContent.trim()===t(mode==='token'?'budgetModeToken':'budgetModePrice'))});
+  syncBudgetInputs();renderBudget();checkBudget();
+}
 function setBudget(){
-  budgetDaily=parseFloat($('#dailyBudgetInput').value)||0;
-  budgetMonthly=parseFloat($('#monthlyBudgetInput').value)||0;
+  var d2=$('#budgetDailyInput2'),m2=$('#budgetMonthlyInput2');
+  budgetDaily=d2?parseFloat(d2.value)||0:budgetDaily;
+  budgetMonthly=m2?parseFloat(m2.value)||0:budgetMonthly;
   lsSet('tb-budget-daily',String(budgetDaily));
   lsSet('tb-budget-monthly',String(budgetMonthly));
-  checkBudget();
+  syncBudgetInputs();checkBudget();
+}
+function setBudgetFromForm(){setBudget()}
+function resetBudget(){
+  budgetDaily=0;budgetMonthly=0;
+  lsSet('tb-budget-daily','0');lsSet('tb-budget-monthly','0');
+  budgetAppModels={};budgetModelModels={};
+  lsSet('tb-budget-app','{}');lsSet('tb-budget-model','{}');
+  syncBudgetInputs();checkBudget();renderBudget();
+}
+function _loadBudgetMaps(){
+  try{budgetAppModels=JSON.parse(localStorage.getItem('tb-budget-app')||'{}')}catch(e){budgetAppModels={}}
+  try{budgetModelModels=JSON.parse(localStorage.getItem('tb-budget-model')||'{}')}catch(e){budgetModelModels={}}
+}
+function _saveAppBudget(name,val){
+  if(val>0)budgetAppModels[name]=val;else delete budgetAppModels[name];
+  lsSet('tb-budget-app',JSON.stringify(budgetAppModels));renderBudget();checkBudget();
+}
+function _saveModelBudget(name,val){
+  if(val>0)budgetModelModels[name]=val;else delete budgetModelModels[name];
+  lsSet('tb-budget-model',JSON.stringify(budgetModelModels));renderBudget();checkBudget();
+}
+var RING_CIRC=2*Math.PI*52;
+function setRing(id,pct){
+  var el=document.getElementById(id);if(!el)return;
+  var p=Math.min(pct,100);
+  el.style.strokeDashoffset=RING_CIRC*(1-p/100);
+  if(pct>=100)el.style.stroke='var(--red)';
+  else if(pct>=80)el.style.stroke='var(--amber)';
+  else el.style.stroke='var(--green)';
+}
+function _localDateStr(){var d=new Date();return d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2)}
+function _localMonthStr(){var d=new Date();return d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2)}
+function _bTodayTokens(){
+  var today=_localDateStr();
+  var t={cost:0,tokens:0};
+  (fullData.daily||[]).forEach(function(d){
+    if(d.date===today){t.cost=d.cost;t.tokens=d.total||0}
+  });
+  return t;
+}
+function _bMonthTokens(){
+  var thisMonth=_localMonthStr();
+  var t={cost:0,tokens:0};
+  (fullData.daily||[]).forEach(function(d){
+    if(d.date&&d.date.startsWith(thisMonth)){t.cost+=d.cost;t.tokens+=d.total||0}
+  });
+  return t;
+}
+function _pctBar(pct){
+  var c=pct>=100?'var(--red)':pct>=80?'var(--amber)':'var(--green)';
+  return'<div style="display:flex;align-items:center;gap:6px"><div style="flex:1;height:6px;background:var(--surface2);border-radius:3px;overflow:hidden"><div style="width:'+Math.min(pct,100)+'%;height:100%;background:'+c+';border-radius:3px;transition:width .6s ease"></div></div><span style="font-size:11px;font-weight:600;min-width:36px;text-align:right;color:'+c+'">'+Math.round(pct)+'%</span></div>';
+}
+function _fmtBudget(v,isToken){return isToken?fmt(v)+' tok':'$'+v.toFixed(2)}
+function renderBudget(){
+  if(!fullData)return;
+  var isToken=budgetMode==='token';
+  var cur=t(isToken?'budgetTokenUnit':'budgetPriceUnit');
+  var today=_bTodayTokens(),month=_bMonthTokens();
+  var todayVal=isToken?today.tokens:today.cost;
+  var monthVal=isToken?month.tokens:month.cost;
+  $('#budgetDailyAmount').textContent=_fmtBudget(todayVal,isToken);
+  $('#budgetMonthlyAmount').textContent=_fmtBudget(monthVal,isToken);
+  var cd=$('#budgetCurD'),cm=$('#budgetCurM');
+  if(cd)cd.textContent=cur;if(cm)cm.textContent=cur;
+  // Daily ring
+  if(budgetDaily>0){
+    var pct=todayVal/budgetDaily*100;
+    $('#budgetDailyPct').textContent=Math.round(pct)+'%';
+    setRing('budgetDailyRing',pct);
+    var rem=budgetDaily-todayVal;
+    var cls=pct>=100?'budget-status-over':pct>=80?'budget-status-warn':'budget-status-ok';
+    $('#budgetDailySub').innerHTML='<span class="'+cls+'">'+(rem>=0?t('budgetRemaining')+': '+_fmtBudget(rem,isToken):t('budgetExceeded')+' '+_fmtBudget(Math.abs(rem),isToken))+'</span>';
+    $('#budgetDailyPct').className='budget-ring-value '+cls;
+  }else{
+    $('#budgetDailyPct').textContent='--';setRing('budgetDailyRing',0);
+    $('#budgetDailySub').innerHTML='<span style="color:var(--muted)">'+t('budgetNoLimit')+'</span>';
+    $('#budgetDailyPct').className='budget-ring-value';
+  }
+  // Monthly ring
+  if(budgetMonthly>0){
+    var pct=monthVal/budgetMonthly*100;
+    $('#budgetMonthlyPct').textContent=Math.round(pct)+'%';
+    setRing('budgetMonthlyRing',pct);
+    var rem=budgetMonthly-monthVal;
+    var cls=pct>=100?'budget-status-over':pct>=80?'budget-status-warn':'budget-status-ok';
+    $('#budgetMonthlySub').innerHTML='<span class="'+cls+'">'+(rem>=0?t('budgetRemaining')+': '+_fmtBudget(rem,isToken):t('budgetExceeded')+' '+_fmtBudget(Math.abs(rem),isToken))+'</span>';
+    $('#budgetMonthlyPct').className='budget-ring-value '+cls;
+  }else{
+    $('#budgetMonthlyPct').textContent='--';setRing('budgetMonthlyRing',0);
+    $('#budgetMonthlySub').innerHTML='<span style="color:var(--muted)">'+t('budgetNoLimit')+'</span>';
+    $('#budgetMonthlyPct').className='budget-ring-value';
+  }
+  syncBudgetInputs();
+  // Compute monthly per-model and per-app data
+  var valKey=isToken?'total':'cost';
+  var fmtVal=function(v){return isToken?fmt(v):fmtC(v)};
+  var thisMonth=_localMonthStr();
+  var monthByModel={},monthByApp={};
+  (fullData.daily||[]).forEach(function(d){
+    if(!d.date||!d.date.startsWith(thisMonth))return;
+    // We don't have per-model/app breakdown in daily, so use overall data
+  });
+  // Use overall by_model/by_app for distribution (all-time)
+  var sortFn=function(a,b){return(b[1][valKey]||0)-(a[1][valKey]||0)};
+  var modelEntries=Object.entries(fullData.by_model||{}).sort(sortFn);
+  var totalM=modelEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
+  // Distribution tables with progress bars
+  var th='<tr><th>'+t('thModel')+'</th><th>'+(isToken?t('thTotal'):t('thCost'))+'</th><th style="min-width:100px">'+t('budgetPct')+'</th></tr>';
+  th+=modelEntries.map(function(e){var v=e[1][valKey]||0;var pct=v/totalM*100;return'<tr><td>'+e[0]+'</td><td>'+fmtVal(v)+'</td><td>'+_pctBar(pct)+'</td></tr>'}).join('');
+  $('#tBudgetModel').innerHTML=th;
+  var appEntries=Object.entries(fullData.by_app||{}).sort(sortFn);
+  var totalA=appEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
+  var th2='<tr><th>'+t('thApp')+'</th><th>'+(isToken?t('thTotal'):t('thCost'))+'</th><th style="min-width:100px">'+t('budgetPct')+'</th></tr>';
+  th2+=appEntries.map(function(e){var v=e[1][valKey]||0;var pct=v/totalA*100;return'<tr><td>'+e[0]+'</td><td>'+fmtVal(v)+'</td><td>'+_pctBar(pct)+'</td></tr>'}).join('');
+  $('#tBudgetApp').innerHTML=th2;
+  // Per-app budget table — monthly limits with budget usage %
+  _loadBudgetMaps();
+  var appH='<tr><th>'+t('thApp')+'</th><th>'+(lang==='zh'?'本月已用':'Month Used')+'</th><th>'+t('budgetLimit')+'</th><th>'+t('budgetPct')+'</th></tr>';
+  appEntries.forEach(function(e){
+    var name=e[0],val=e[1][valKey]||0,limit=budgetAppModels[name]||0;
+    var pct=limit>0?val/limit*100:0;
+    appH+='<tr><td>'+name+'</td><td>'+fmtVal(val)+'</td><td><input type="number" min="0" step="1" value="'+limit+'" style="width:80px;background:var(--surface2);border:1px solid rgba(127,127,127,.15);color:var(--text);padding:3px 6px;border-radius:4px;font-size:11px;font-family:inherit" onchange="_saveAppBudget(\''+name.replace(/'/g,"\\'")+'\',parseFloat(this.value)||0)"></td><td>'+(limit>0?_pctBar(pct):'<span style="color:var(--muted);font-size:11px">-</span>')+'</td></tr>';
+  });
+  $('#tBudgetAppDetail').innerHTML=appH;
+  // Per-model budget table
+  var modH='<tr><th>'+t('thModel')+'</th><th>'+(lang==='zh'?'本月已用':'Month Used')+'</th><th>'+t('budgetLimit')+'</th><th>'+t('budgetPct')+'</th></tr>';
+  modelEntries.forEach(function(e){
+    var name=e[0],val=e[1][valKey]||0,limit=budgetModelModels[name]||0;
+    var pct=limit>0?val/limit*100:0;
+    modH+='<tr><td>'+name+'</td><td>'+fmtVal(val)+'</td><td><input type="number" min="0" step="1" value="'+limit+'" style="width:80px;background:var(--surface2);border:1px solid rgba(127,127,127,.15);color:var(--text);padding:3px 6px;border-radius:4px;font-size:11px;font-family:inherit" onchange="_saveModelBudget(\''+name.replace(/'/g,"\\'")+'\',parseFloat(this.value)||0)"></td><td>'+(limit>0?_pctBar(pct):'<span style="color:var(--muted);font-size:11px">-</span>')+'</td></tr>';
+  });
+  $('#tBudgetModelDetail').innerHTML=modH;
 }
 function checkBudget(){
   if(!fullData)return;
   var el=$('#budgetWarn');if(!el)return;
-  var today=new Date().toISOString().slice(0,10);
-  var thisMonth=today.slice(0,7);
-  var todayCost=0,monthCost=0;
-  (fullData.daily||[]).forEach(function(d){
-    if(d.date===today)todayCost=d.cost;
-    if(d.date&&d.date.startsWith(thisMonth))monthCost+=d.cost;
-  });
+  _loadBudgetMaps();
+  var isToken=budgetMode==='token';
+  var today=_bTodayTokens(),month=_bMonthTokens();
+  var todayVal=isToken?today.tokens:today.cost;
+  var monthVal=isToken?month.tokens:month.cost;
+  var valKey=isToken?'total':'cost';
   var msgs=[];
   if(budgetDaily>0){
-    var pct=todayCost/budgetDaily*100;
-    if(pct>=100)msgs.push({t:'$'+todayCost.toFixed(2)+'/'+budgetDaily,c:'budget-warn-100'});
-    else if(pct>=80)msgs.push({t:'$'+todayCost.toFixed(2)+'/'+budgetDaily,c:'budget-warn-80'});
+    var pct=todayVal/budgetDaily*100;
+    var label=isToken?fmt(Math.round(todayVal))+'/'+fmt(budgetDaily)+' tok':'$'+todayVal.toFixed(2)+'/'+budgetDaily;
+    if(pct>=100)msgs.push({t:label,c:'budget-warn-100'});
+    else if(pct>=80)msgs.push({t:label,c:'budget-warn-80'});
   }
   if(budgetMonthly>0){
-    var pct=monthCost/budgetMonthly*100;
-    if(pct>=100)msgs.push({t:'M $'+monthCost.toFixed(2)+'/'+budgetMonthly,c:'budget-warn-100'});
-    else if(pct>=80)msgs.push({t:'M $'+monthCost.toFixed(2)+'/'+budgetMonthly,c:'budget-warn-80'});
+    var pct=monthVal/budgetMonthly*100;
+    var label=isToken?'M '+fmt(Math.round(monthVal))+'/'+fmt(budgetMonthly)+' tok':'M $'+monthVal.toFixed(2)+'/'+budgetMonthly;
+    if(pct>=100)msgs.push({t:label,c:'budget-warn-100'});
+    else if(pct>=80)msgs.push({t:label,c:'budget-warn-80'});
   }
+  // Per-app budget warnings
+  var appData=fullData.by_app||{};
+  Object.keys(budgetAppModels).forEach(function(name){
+    var limit=budgetAppModels[name];if(!limit)return;
+    var val=(appData[name]||{})[valKey]||0;
+    var pct=val/limit*100;
+    if(pct>=100)msgs.push({t:name+': '+_fmtBudget(val,isToken),c:'budget-warn-100'});
+    else if(pct>=80)msgs.push({t:name+': '+_fmtBudget(val,isToken),c:'budget-warn-80'});
+  });
+  // Per-model budget warnings
+  var modelData=fullData.by_model||{};
+  Object.keys(budgetModelModels).forEach(function(name){
+    var limit=budgetModelModels[name];if(!limit)return;
+    var val=(modelData[name]||{})[valKey]||0;
+    var pct=val/limit*100;
+    if(pct>=100)msgs.push({t:name+': '+_fmtBudget(val,isToken),c:'budget-warn-100'});
+    else if(pct>=80)msgs.push({t:name+': '+_fmtBudget(val,isToken),c:'budget-warn-80'});
+  });
   if(msgs.length){
     el.innerHTML=msgs.map(function(m){return'<span class="budget-warn '+m.c+'">'+m.t+'</span>'}).join('');
   }else{el.innerHTML=''}
@@ -1606,31 +1995,88 @@ function renderEfficiency(){
   el.innerHTML=html;
 }
 
+// ── Model Ranking ──
+function renderModelRanking(timeModelData,labelFn){
+  if(!timeModelData||!timeModelData.length)return;
+  // Flatten: each model+timePeriod as separate entry, sort by total desc
+  var entries=[];
+  var modelColors={};
+  var colorPool=['#818cf8','#22d3ee','#4ade80','#fbbf24','#f87171','#c084fc','#f472b6','#60a5fa','#34d399','#fb923c'];
+  var ci=0;
+  timeModelData.forEach(function(d){
+    var periodLabel=labelFn(d);
+    Object.keys(d.models).forEach(function(m){
+      if(!modelColors[m]){modelColors[m]=colorPool[ci%colorPool.length];ci++}
+      var total=d.models[m].total||0;
+      if(total>0)entries.push({label:m+' '+periodLabel,total:total,color:modelColors[m]});
+    });
+  });
+  entries.sort(function(a,b){return b.total-a.total});
+  if(!entries.length)return;
+  var labels=entries.map(function(e){return e.label});
+  var data=entries.map(function(e){return e.total});
+  var bg=entries.map(function(e){return e.color+'cc'});
+  kill('cModelRanking');
+  var ctx=document.getElementById('cModelRanking');if(!ctx)return;
+  // Dynamic height based on entry count
+  var h=Math.max(200,entries.length*22+40);
+  ctx.canvas.style.height=h+'px';
+  charts['cModelRanking']=new Chart(ctx,{type:'bar',data:{labels:labels,datasets:[{data:data,backgroundColor:bg,borderRadius:3}]},
+    options:{
+      indexAxis:'y',responsive:true,maintainAspectRatio:false,
+      animation:_anim(600,function(c){return c.dataIndex*30}),
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:function(c){return fmt(c.raw)+' tokens'}}}},
+      scales:{x:{ticks:{color:'#71717a',font:{size:9},callback:function(v){return fmt(v)}},grid:{color:'rgba(63,63,70,.3)'}},
+              y:{ticks:{color:'#a1a1aa',font:{size:10},padding:4},grid:{display:false}}}
+    }
+  });
+}
+
 // ── Heatmap ──
-function renderHeatmap(){
-  pywebview.api.get_heatmap().then(function(r){
-    var data=JSON.parse(r);
-    var canvas=document.getElementById('cHeatmap');
-    if(!canvas)return;
-    var ctx=canvas.getContext('2d');
-    var dpr=window.devicePixelRatio||1;
-    var cw=600,ch=180;
-    canvas.width=cw*dpr;canvas.height=ch*dpr;
-    canvas.style.width=cw+'px';canvas.style.height=ch+'px';
+function renderHeatmap(start,end){
+  var canvas=document.getElementById('cHeatmap');
+  if(!canvas)return;
+  var ctx=canvas.getContext('2d');if(!ctx)return;
+  var dpr=window.devicePixelRatio||1;
+  var cw=600,ch=180;
+  canvas.width=cw*dpr;canvas.height=ch*dpr;
+  canvas.style.width=cw+'px';canvas.style.height=ch+'px';
+  ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,cw,ch);
+  ctx.font='10px Inter,sans-serif';ctx.fillStyle='#71717a';
+  ctx.fillText(t('loading'),cw/2-20,ch/2);
+  pywebview.api.get_heatmap(start||'',end||'').then(function(r){
+    var resp=JSON.parse(r);
+    var data=resp.heatmap||resp;
+    var labels=resp.labels||[];
+    ctx.setTransform(1,0,0,1,0,0);
     ctx.scale(dpr,dpr);
     ctx.clearRect(0,0,cw,ch);
+    if(!Array.isArray(data)||data.length===0){ctx.font='11px Inter,sans-serif';ctx.fillStyle='#71717a';ctx.fillText(t('noData'),cw/2-20,ch/2);return}
+    var numRows=data.length;
     var maxVal=0;
-    data.forEach(function(row){row.forEach(function(v){if(v>maxVal)maxVal=v})});
-    if(maxVal===0)return;
-    var cellW=22,cellH=20,padL=28,padT=22;
-    var days=[t('mo'),t('tu'),t('we'),t('th'),t('fr'),t('sa'),t('su')];
+    for(var d=0;d<numRows;d++){if(data[d])for(var h=0;h<24;h++){var v=data[d][h]||0;if(v>maxVal)maxVal=v}}
+    if(maxVal===0){ctx.font='12px Inter,sans-serif';ctx.fillStyle='#71717a';ctx.fillText(t('noData'),cw/2-20,ch/2);return}
+    var cellW=22,cellH=20,padL=labels.length?42:28,padT=22;
+    var rowLabels=labels.length?labels:[t('mo'),t('tu'),t('we'),t('th'),t('fr'),t('sa'),t('su')];
+    // Resize canvas if needed
+    var neededH=padT+numRows*cellH+4;
+    if(neededH>ch){
+      ch=neededH;
+      canvas.height=ch*dpr;canvas.style.height=ch+'px';
+      ctx.setTransform(1,0,0,1,0,0);ctx.scale(dpr,dpr);ctx.clearRect(0,0,cw,ch);
+    }
     ctx.font='9px Inter,sans-serif';ctx.fillStyle='#71717a';
     for(var h=0;h<24;h++){ctx.fillText(h+'',padL+h*cellW+2,14)}
-    for(var d=0;d<7;d++){ctx.fillText(days[d],2,padT+d*cellH+14)}
-    for(var d=0;d<7;d++){
+    for(var d=0;d<numRows;d++){
+      var lbl=rowLabels[d]||'';
+      if(labels.length)lbl=lbl.slice(5); // MM-DD for date labels
+      ctx.fillText(lbl,2,padT+d*cellH+14)
+    }
+    for(var d=0;d<numRows;d++){
       for(var h=0;h<24;h++){
         var v=data[d][h];
-        var intensity=v/maxVal;
+        var intensity=maxVal>0?v/maxVal:0;
         var r2=Math.round(30+intensity*99);
         var g2=Math.round(27+intensity*113);
         var b2=Math.round(75+intensity*173);
@@ -1638,7 +2084,7 @@ function renderHeatmap(){
         ctx.fillRect(padL+h*cellW,padT+d*cellH,cellW-2,cellH-2);
       }
     }
-  });
+  }).catch(function(e){console.error('Heatmap error:',e);ctx.setTransform(1,0,0,1,0,0);ctx.scale(dpr,dpr);ctx.clearRect(0,0,cw,ch);ctx.font='11px Inter,sans-serif';ctx.fillStyle='#f87171';ctx.fillText('Error: '+e,cw/2-40,ch/2)});
 }
 
 // ── Model Trends ──
@@ -1770,11 +2216,11 @@ function toggleSessionDetail(sessionId,rowEl){
       var role=m.type==='user'?'user':m.type==='assistant'?'assistant':'system';
       var roleLabel=role.toUpperCase();
       var body='';
-      if(m.text)body=m.text;
-      else if(m.type==='assistant')body='['+m.model+'] in:'+fmt(m.input)+' out:'+fmt(m.output)+' cache:'+fmt(m.cache_read)+' $'+(m.cost||0).toFixed(4);
+      if(m.text)body=escH(m.text);
+      else if(m.type==='assistant')body='['+escH(m.model||'')+'] in:'+fmt(m.input)+' out:'+fmt(m.output)+' cache:'+fmt(m.cache_read)+' $'+(m.cost||0).toFixed(4);
       else if(m.type==='token')body='in:'+fmt(m.input)+' out:'+fmt(m.output)+' cache:'+fmt(m.cache_read);
       var ts=m.ts?m.ts.replace('T',' ').slice(0,19):'';
-      html+='<div class="sess-msg"><span class="role role-'+role+'">'+roleLabel+'</span><span class="body">'+body+'</span><span class="meta">'+ts+'</span></div>';
+      html+='<div class="sess-msg"><span class="role role-'+role+'">'+roleLabel+'</span><span class="body">'+body+'</span><span class="meta">'+escH(ts)+'</span></div>';
     });
     if(!d.messages.length)html+='<div style="color:var(--muted);font-size:11px">'+t('noData')+'</div>';
     html+='</div>';
@@ -1826,14 +2272,18 @@ function reload(){
   $('#status').textContent=t('loading');
   pywebview.api.reload().then(function(r){
     var d=JSON.parse(r);fullData=d;
-    render(d);renderDaily(d);renderHeatmap();renderModelTrends();
-    if(d.daily.length){$('#dStart').value=d.daily[0].date;$('#dEnd').value=d.daily[d.daily.length-1].date}
-    allDates=d.daily.map(function(x){return x.date});
+    render(d);renderModelTrends();checkBudget();if($('#s-budget.active'))renderBudget();
+    if(d.daily.length){
+      allDates=d.daily.map(function(x){return x.date});
+      $('#dStart').value=d.daily[0].date;$('#dEnd').value=d.daily[d.daily.length-1].date;
+    }
     if(allDates.length>=14){
       var mid=Math.floor(allDates.length/2);
       $('#c1s').value=allDates[mid];$('#c1e').value=allDates[allDates.length-1];
       $('#c2s').value=allDates[0];$('#c2e').value=allDates[mid-1];
     }
+    // Default to 1D view
+    if(allDates.length){presetDaily(1)}else{renderDaily(d)}
     $('#status').textContent=t('loaded')+' '+d.summary.total_records+' '+t('loadedSuff');
     startAutoRefresh();
     var overlay=$('#loadingOverlay');
