@@ -167,7 +167,7 @@ def load_codex_sessions():
         if max_input == 0 and max_output == 0:
             max_output = int(max_total * 0.3)
             max_input = max_total - max_output
-        non_cached = max_input - max_cached
+        non_cached = max(0, max_input - max_cached)
         if msg_count == 0:
             msg_count = 1
         codex_local_dt = datetime.fromisoformat(last_ts.replace("Z", "+00:00")).astimezone() if last_ts else None
@@ -346,7 +346,7 @@ class Api:
         by_hour = defaultdict(lambda: {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0, "cost": 0.0, "count": 0})
         for r in records:
             ts = r["timestamp"]
-            hour = ts[11:13] if len(ts) > 13 else "00"
+            hour = ts[11:13] if len(ts) >= 13 else "00"
             h = by_hour[hour]
             h["input"] += r["input"]
             h["output"] += r["output"]
@@ -520,67 +520,32 @@ class Api:
         (d / "pricing.json").write_text(json.dumps(custom, indent=2), encoding="utf-8")
 
     def _process(self, records):
-        by_app = defaultdict(lambda: {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0, "cost": 0.0, "count": 0})
+        _new = lambda: {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0, "cost": 0.0, "count": 0}
+        by_app = defaultdict(_new)
+        by_model = defaultdict(_new)
+        by_date = defaultdict(_new)
+        by_proj = defaultdict(lambda: {**_new(), "sessions": set()})
+        by_sess = defaultdict(lambda: {"app": "", "project": "", "model": "", "date": "", "summary": "", **_new()})
         for r in records:
+            cc = r.get("cache_create", 0)
+            cnt = r.get("count", 1)
             a = by_app[r["app"]]
-            a["input"] += r["input"]
-            a["output"] += r["output"]
-            a["cache_read"] += r["cache_read"]
-            a["cache_create"] += r.get("cache_create", 0)
-            a["cost"] += r["cost"]
-            a["count"] += r.get("count", 1)
-
-        by_model = defaultdict(lambda: {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0, "cost": 0.0, "count": 0})
-        for r in records:
+            a["input"] += r["input"]; a["output"] += r["output"]; a["cache_read"] += r["cache_read"]; a["cache_create"] += cc; a["cost"] += r["cost"]; a["count"] += cnt
             m = by_model[r["model"]]
-            m["input"] += r["input"]
-            m["output"] += r["output"]
-            m["cache_read"] += r["cache_read"]
-            m["cache_create"] += r.get("cache_create", 0)
-            m["cost"] += r["cost"]
-            m["count"] += r.get("count", 1)
-
-        by_date = defaultdict(lambda: {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0, "cost": 0.0, "count": 0})
-        for r in records:
+            m["input"] += r["input"]; m["output"] += r["output"]; m["cache_read"] += r["cache_read"]; m["cache_create"] += cc; m["cost"] += r["cost"]; m["count"] += cnt
             if r["date"]:
                 d = by_date[r["date"]]
-                d["input"] += r["input"]
-                d["output"] += r["output"]
-                d["cache_read"] += r["cache_read"]
-                d["cache_create"] += r.get("cache_create", 0)
-                d["cost"] += r["cost"]
-                d["count"] += r.get("count", 1)
-
-        by_proj = defaultdict(lambda: {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0, "cost": 0.0, "count": 0, "sessions": set()})
-        for r in records:
+                d["input"] += r["input"]; d["output"] += r["output"]; d["cache_read"] += r["cache_read"]; d["cache_create"] += cc; d["cost"] += r["cost"]; d["count"] += cnt
             p = by_proj[r["project"]]
-            p["input"] += r["input"]
-            p["output"] += r["output"]
-            p["cache_read"] += r["cache_read"]
-            p["cache_create"] += r.get("cache_create", 0)
-            p["cost"] += r["cost"]
-            p["count"] += r.get("count", 1)
-            p["sessions"].add(r["session"])
-
-        by_sess = defaultdict(lambda: {"app": "", "project": "", "model": "", "date": "", "summary": "", "input": 0, "output": 0, "cache_read": 0, "cache_create": 0, "cost": 0.0, "count": 0})
-        for r in records:
+            p["input"] += r["input"]; p["output"] += r["output"]; p["cache_read"] += r["cache_read"]; p["cache_create"] += cc; p["cost"] += r["cost"]; p["count"] += cnt; p["sessions"].add(r["session"])
             s = by_sess[r["session"]]
-            s["app"] = r["app"]
-            s["project"] = r["project"]
-            s["model"] = r["model"]
-            s["date"] = r["date"]
-            if r.get("summary"):
-                s["summary"] = r["summary"]
-            s["input"] += r["input"]
-            s["output"] += r["output"]
-            s["cache_read"] += r["cache_read"]
-            s["cache_create"] += r.get("cache_create", 0)
-            s["cost"] += r["cost"]
-            s["count"] += r.get("count", 1)
+            s["app"] = r["app"]; s["project"] = r["project"]; s["model"] = r["model"]; s["date"] = r["date"]
+            if r.get("summary"): s["summary"] = r["summary"]
+            s["input"] += r["input"]; s["output"] += r["output"]; s["cache_read"] += r["cache_read"]; s["cache_create"] += cc; s["cost"] += r["cost"]; s["count"] += cnt
 
         total_input_full = sum(a["input"] + a["cache_read"] + a["cache_create"] for a in by_app.values())
-        cache_denom = sum(a["input"] + a["cache_read"] + a["cache_create"] for a in by_app.values())
-        cache_rate = (sum(a["cache_read"] for a in by_app.values()) / cache_denom * 100) if cache_denom else 0
+        total_cache_read = sum(a["cache_read"] for a in by_app.values())
+        cache_rate = (total_cache_read / total_input_full * 100) if total_input_full else 0
         recent = sorted(records, key=lambda r: r.get("timestamp", ""), reverse=True)[:10]
         recent_out = [{"timestamp": r.get("timestamp", ""), "app": r["app"], "model": r["model"],
                         "session": r["session"], "summary": r.get("summary", ""),
@@ -592,7 +557,7 @@ class Api:
                 "total_input": sum(a["input"] for a in by_app.values()),
                 "total_input_full": total_input_full,
                 "total_output": sum(a["output"] for a in by_app.values()),
-                "total_cache_read": sum(a["cache_read"] for a in by_app.values()),
+                "total_cache_read": total_cache_read,
                 "total_cache_create": sum(a["cache_create"] for a in by_app.values()),
                 "total_cost": sum(a["cost"] for a in by_app.values()),
                 "total_records": len(records),
@@ -1179,7 +1144,7 @@ function startAutoRefresh(){
     _autoRefreshTimer=setInterval(function(){
       pywebview.api.reload().then(function(r){
         var d=JSON.parse(r);fullData=d;
-        render(d);renderDaily(d);
+        render(d);renderDaily(d);renderHeatmap();
         if(d.daily.length){allDates=d.daily.map(function(x){return x.date})}
         $('#status').textContent=t('loaded')+' '+d.summary.total_records+' '+t('loadedSuff');
       });
@@ -1213,12 +1178,16 @@ function applyLang(){
     var key=el.dataset.i18n;if(!key)return;
     if(el.querySelector('[data-i18n]'))return;
     var dot=el.querySelector('.dot');
-    if(dot){el.innerHTML='';el.appendChild(dot);el.appendChild(document.createTextNode(t(key)))}
+    if(dot){
+      var tn=dot.nextSibling;
+      if(tn&&tn.nodeType===3){tn.textContent=t(key)}
+      else{el.insertBefore(document.createTextNode(t(key)),dot.nextSibling)}
+    }
     else{el.textContent=t(key)}
   });
   var appL=$('#appLabel');if(appL)appL.textContent=t('appLabel');
   var rBtn=$('#reloadBtn');if(rBtn)rBtn.textContent=t('reload');
-  if(fullData){render(fullData);renderDaily(fullData)}
+  if(fullData){render(fullData);renderDaily(fullData);renderHeatmap()}
 }
 
 // ── Chart helpers ──
@@ -1395,8 +1364,7 @@ function renderDaily(data){
   const rows=dd.map(d=>[d.date,fmt(d.count),fmt(d.input),fmt(d.output),fmt(d.cache_read),fmt(d.total),fmtC(d.cost)]);
   mkT($('#tDaily'),[t('thDate'),t('thMsgs'),t('thInput'),t('thOutput'),t('thCache'),t('thTotal'),t('thCost')],rows);
   var detail=$$('#s-daily .panel h3[data-i18n]');
-  detail.forEach(function(el){if(el.dataset.i18n==='dailyDetail'){el.lastChild.textContent=t('dailyDetail')}});
-  renderHeatmap();renderModelTrends();
+  detail.forEach(function(el){if(el.dataset.i18n==='dailyDetail'){var d=el.querySelector('.dot');if(d&&d.nextSibling)d.nextSibling.textContent=t('dailyDetail')}});
 }
 
 function renderHourly(data){
@@ -1423,7 +1391,7 @@ function renderHourly(data){
   var rows=hh.map(h=>[h.hour,fmt(h.count),fmt(h.input),fmt(h.output),fmt(h.cache_read),fmt(h.total),fmtC(h.cost)]);
   mkT($('#tDaily'),[t('thHour'),t('thMsgs'),t('thInput'),t('thOutput'),t('thCache'),t('thTotal'),t('thCost')],rows);
   var detail=$$('#s-daily .panel h3[data-i18n]');
-  detail.forEach(function(el){if(el.dataset.i18n==='dailyDetail'){el.lastChild.textContent=lang==='zh'?'逐时详情':'Hourly Detail'}});
+  detail.forEach(function(el){if(el.dataset.i18n==='dailyDetail'){var d=el.querySelector('.dot');if(d&&d.nextSibling)d.nextSibling.textContent=lang==='zh'?'逐时详情':'Hourly Detail'}});
 }
 
 function applyDaily(){
@@ -1712,6 +1680,8 @@ function exportCSV(section){
     rows=extractTableRows('#tSession');
   }else if(section==='compare'){
     rows=extractTableRows('#tC1');
+    var r2=extractTableRows('#tC2');
+    if(r2.length>1){rows.push(['']);rows.push(['--- Period B ---']);rows=rows.concat(r2.slice(1))}
   }
   if(rows.length>0){
     csv=rows.map(function(r){return r.join(',')}).join('\n');
@@ -1725,13 +1695,16 @@ function extractTableRows(sel){
     var cols=[];tr.querySelectorAll('th').forEach(function(th){cols.push('"'+th.textContent.trim()+'"')});rows.push(cols);
   });
   table.querySelectorAll('tbody tr').forEach(function(tr){
+    if(tr.classList.contains('sess-detail'))return;
     var cols=[];tr.querySelectorAll('td').forEach(function(td){cols.push('"'+td.textContent.trim()+'"')});rows.push(cols);
   });
   return rows;
 }
 function downloadFile(name,content,type){
   var blob=new Blob([content],{type:type});
-  var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a');a.href=url;a.download=name;a.click();
+  setTimeout(function(){URL.revokeObjectURL(url)},1000);
 }
 
 // ── Report ──
@@ -1773,20 +1746,24 @@ function genReport(days){
 function copyReport(){
   var text=$('#reportText').textContent;
   if(!text)return;
-  navigator.clipboard.writeText(text);
+  navigator.clipboard.writeText(text).catch(function(){
+    var ta=document.createElement('textarea');ta.value=text;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);
+  });
 }
 
 // ── Session Detail ──
 var _openDetail=null;
 function toggleSessionDetail(sessionId,rowEl){
-  var existing=document.querySelector('.sess-detail.open');
-  if(existing){existing.classList.remove('open');if(existing.dataset.id===sessionId){_openDetail=null;return}}
+  document.querySelectorAll('.sess-detail.open').forEach(function(el){el.classList.remove('open')});
+  if(_openDetail===sessionId){_openDetail=null;return}
   var detailRow=rowEl.nextElementSibling;
   if(!detailRow||!detailRow.classList.contains('sess-detail'))return;
+  _openDetail=sessionId;
   if(detailRow.dataset.loaded){
-    detailRow.classList.add('open');_openDetail=sessionId;return;
+    detailRow.classList.add('open');return;
   }
   pywebview.api.get_session_detail(sessionId).then(function(r){
+    if(_openDetail!==sessionId)return;
     var d=JSON.parse(r);
     var html='<div class="sess-detail-inner">';
     d.messages.forEach(function(m){
@@ -1849,7 +1826,7 @@ function reload(){
   $('#status').textContent=t('loading');
   pywebview.api.reload().then(function(r){
     var d=JSON.parse(r);fullData=d;
-    render(d);renderDaily(d);
+    render(d);renderDaily(d);renderHeatmap();renderModelTrends();
     if(d.daily.length){$('#dStart').value=d.daily[0].date;$('#dEnd').value=d.daily[d.daily.length-1].date}
     allDates=d.daily.map(function(x){return x.date});
     if(allDates.length>=14){
