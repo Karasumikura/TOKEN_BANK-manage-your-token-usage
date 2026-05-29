@@ -1445,6 +1445,15 @@ function initSettings(){
   syncBudgetInputs();
   syncSettingsUI();
   applyLang();
+  // Event delegation for per-app/per-model budget inputs
+  document.addEventListener('input',function(ev){
+    var el=ev.target;
+    if(!el.dataset||!el.dataset.budgetType)return;
+    var val=parseFloat(el.value)||0;
+    var name=el.dataset.budgetName;
+    if(el.dataset.budgetType==='app'){_saveAppBudget(name,val)}
+    else if(el.dataset.budgetType==='model'){_saveModelBudget(name,val)}
+  });
 }
 function applyLang(){
   document.documentElement.lang=lang==='zh'?'zh-CN':'en';
@@ -2033,16 +2042,14 @@ function renderBudget(){
     appEntries.forEach(function(e){
       var name=e[0],val=e[1][valKey]||0,limit=budgetAppModels[name]||0;
       var rate=limit>0?val/limit*100:0;var ratio=val/totalA*100;
-      var nEsc=name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-      appH+='<tr><td>'+name+'</td><td>'+fmtVal(val)+'</td><td><input type="number" min="0" step="1" value="'+limit+'" style="width:80px;background:var(--surface2);border:1px solid rgba(127,127,127,.15);color:var(--text);padding:3px 6px;border-radius:4px;font-size:11px;font-family:inherit" oninput="_saveAppBudget(\''+nEsc+'\',parseFloat(this.value)||0)"></td><td>'+(limit>0?_pctBar(rate):'<span style="color:var(--muted);font-size:11px">-</span>')+'</td><td>'+_pctBar(ratio)+'</td></tr>';
+      appH+='<tr><td>'+name+'</td><td>'+fmtVal(val)+'</td><td><input type="number" min="0" step="1" value="'+limit+'" data-budget-type="app" data-budget-name="'+escH(name)+'" style="width:80px;background:var(--surface2);border:1px solid rgba(127,127,127,.15);color:var(--text);padding:3px 6px;border-radius:4px;font-size:11px;font-family:inherit"></td><td>'+(limit>0?_pctBar(rate):'<span style="color:var(--muted);font-size:11px">-</span>')+'</td><td>'+_pctBar(ratio)+'</td></tr>';
     });
     $('#tBudgetAppDetail').innerHTML=appH;
     var modH='<tr><th>'+t('thModel')+'</th><th>'+(lang==='zh'?'已用':'Used')+'</th><th>'+_budgetLabel()+'</th><th>'+rateLabel+'</th><th>'+ratioLabel+'</th></tr>';
     modelEntries.forEach(function(e){
       var name=e[0],val=e[1][valKey]||0,limit=budgetModelModels[name]||0;
       var rate=limit>0?val/limit*100:0;var ratio=val/totalM*100;
-      var nEsc=name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-      modH+='<tr><td>'+name+'</td><td>'+fmtVal(val)+'</td><td><input type="number" min="0" step="1" value="'+limit+'" style="width:80px;background:var(--surface2);border:1px solid rgba(127,127,127,.15);color:var(--text);padding:3px 6px;border-radius:4px;font-size:11px;font-family:inherit" oninput="_saveModelBudget(\''+nEsc+'\',parseFloat(this.value)||0)"></td><td>'+(limit>0?_pctBar(rate):'<span style="color:var(--muted);font-size:11px">-</span>')+'</td><td>'+_pctBar(ratio)+'</td></tr>';
+      modH+='<tr><td>'+name+'</td><td>'+fmtVal(val)+'</td><td><input type="number" min="0" step="1" value="'+limit+'" data-budget-type="model" data-budget-name="'+escH(name)+'" style="width:80px;background:var(--surface2);border:1px solid rgba(127,127,127,.15);color:var(--text);padding:3px 6px;border-radius:4px;font-size:11px;font-family:inherit"></td><td>'+(limit>0?_pctBar(rate):'<span style="color:var(--muted);font-size:11px">-</span>')+'</td><td>'+_pctBar(ratio)+'</td></tr>';
     });
     $('#tBudgetModelDetail').innerHTML=modH;
   }
