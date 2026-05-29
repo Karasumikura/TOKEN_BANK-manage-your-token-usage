@@ -12,6 +12,14 @@
 
 ---
 
+<div align="center">
+<img src="PIC/屏幕截图%202026-05-29%20160646.png" width="90%" alt="Overview Dashboard">
+<img src="PIC/屏幕截图%202026-05-29%20160653.png" width="90%" alt="Usage Report">
+<img src="PIC/屏幕截图%202026-05-29%20161301.png" width="90%" alt="Mini View">
+</div>
+
+---
+
 ## Key Features
 
 | Feature | Description |
@@ -83,19 +91,9 @@
 
 ---
 
-## Built-in Model Pricing
+## Custom Model Pricing
 
-| Model | Input | Output | Cache Read |
-|:---|---:|---:|---:|
-| claude-opus-4-7 | $5.00 | $25.00 | $0.50 |
-| claude-sonnet-4-6 | $3.00 | $15.00 | $0.30 |
-| claude-haiku-4-5 | $1.00 | $5.00 | $0.10 |
-| mimo-v2-pro | $1.00 | $3.00 | $0.00 |
-| mimo-v2.5-pro | $0.00 | $0.00 | $0.00 |
-| gpt-5.4 | $2.50 | $15.00 | $0.25 |
-| gpt-5.5 | $5.00 | $30.00 | $0.50 |
-
-> Prices are $/1M tokens. Fully customizable in Settings. Unmatched models use default pricing.
+Set per-model Input / Output / Cache Read prices ($/1M tokens). Built-in defaults for popular models, fully customizable in Settings — add new models, edit prices, or reset to defaults. Unmatched models fall back to default pricing.
 
 ---
 
