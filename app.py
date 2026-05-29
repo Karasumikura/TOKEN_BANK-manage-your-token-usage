@@ -1479,17 +1479,14 @@ function render(d){
       const label=sm?truncW(sm,100):r.session.substring(0,12)+'...';
       const cnt=r.count||1;
       const isSess=cnt>1;
-      // Show per-message averages for session-level records
-      const inp=isSess?Math.round((r.input||0)/cnt):(r.input||0);
+      const sessTotal=(r.input||0)+(r.cache_read||0)+(r.cache_create||0);
+      const msgTotal=isSess?Math.round(sessTotal/cnt):sessTotal;
       const outp=isSess?Math.round((r.output||0)/cnt):(r.output||0);
-      const crd=isSess?Math.round((r.cache_read||0)/cnt):(r.cache_read||0);
-      const ti=inp+crd+(isSess?Math.round((r.cache_create||0)/cnt):(r.cache_create||0));
-      const cost=isSess?(r.cost||0)/cnt:(r.cost||0);
       const sessLabel=lang==='zh'?'会话':'session';
       const sessTag=isSess?'<span class="badge" style="font-size:9px;padding:1px 4px;margin-left:4px;background:rgba(251,191,36,.2);color:#fbbf24">'+sessLabel+' ('+cnt+')</span>':'';
-      return[ts,badge(r.app)+sessTag,r.model,fmt(ti),fmt(inp),fmt(outp),fmtC(cost),label]
+      return[ts,badge(r.app)+sessTag,r.model,fmt(sessTotal),fmt(msgTotal),fmt(outp),label]
     });
-    mkT($('#tRecent'),[t('thTime'),t('thApp'),t('thModel'),t('thTotalInput'),t('thNonCacheInput'),t('thOutput'),lang==='zh'?'平均费用':'Avg Cost',t('thSummary')],recR);
+    mkT($('#tRecent'),[t('thTime'),t('thApp'),t('thModel'),lang==='zh'?'会话总输入':'Sess Input',lang==='zh'?'消息总输入':'Msg Input',t('thOutput'),t('thSummary')],recR);
   }
 
   // Projects
