@@ -705,7 +705,7 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
 .topbar h1 span{color:var(--indigo);display:inline-block;transition:transform .3s var(--ease-spring)}
 .topbar h1:hover span{transform:scale(1.1) rotate(-2deg)}
 .topbar .actions{display:flex;gap:8px;align-items:center}
-.sidebar{background:var(--surface);box-shadow:1px 0 3px rgba(0,0,0,.06);padding:16px 12px;display:flex;flex-direction:column;gap:2px;overflow-y:auto;animation:slideRight .6s var(--ease-elastic) .1s both}
+.sidebar{background:var(--surface);box-shadow:1px 0 3px rgba(0,0,0,.06);padding:16px 12px;display:flex;flex-direction:column;gap:2px;overflow-y:auto;overflow-x:clip;animation:slideRight .6s var(--ease-elastic) .1s both}
 .nav-item{padding:10px 14px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:500;color:var(--dim);display:flex;align-items:center;gap:10px;transition:all .3s var(--ease-elastic);user-select:none;animation:fadeSlideLeft .5s var(--ease-elastic) both;position:relative}
 .nav-item:nth-child(1){animation-delay:.12s}.nav-item:nth-child(2){animation-delay:.18s}.nav-item:nth-child(3){animation-delay:.24s}.nav-item:nth-child(4){animation-delay:.3s}.nav-item:nth-child(5){animation-delay:.36s}.nav-item:nth-child(6){animation-delay:.42s}.nav-item:nth-child(7){animation-delay:.48s}.nav-item:nth-child(9){animation-delay:.54s}
 .nav-item:hover{background:var(--surface2);color:var(--text);transform:translateX(4px);padding-left:18px}
@@ -714,7 +714,7 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
 .nav-item .icon{width:18px;text-align:center;font-size:15px;transition:transform .35s var(--ease-elastic)}
 .nav-item:hover .icon{transform:scale(1.2) rotate(-5deg)}
 .nav-item.active .icon{animation:elasticPop .5s var(--ease-bounce)}
-.content{padding:24px;overflow-y:auto;overflow-x:hidden;animation:fadeScaleIn .5s var(--ease-out-expo) .2s both}
+.content{padding:24px;overflow-y:auto;overflow-x:clip;animation:fadeScaleIn .5s var(--ease-out-expo) .2s both}
 
 /* Components */
 .cards{display:grid;grid-template-columns:repeat(6,1fr);gap:14px;margin-bottom:20px}
@@ -802,7 +802,7 @@ tr:hover td{background:rgba(255,255,255,.05)}
 @keyframes spin{to{transform:rotate(360deg)}}
 .loading-text{margin-top:16px;font-size:13px;color:var(--dim);font-weight:500;letter-spacing:.5px}
 
-.table-scroll{max-height:400px;overflow-y:auto;overflow-x:auto;-webkit-overflow-scrolling:touch}
+.table-scroll{max-height:400px;overflow-y:auto;overflow-x:clip;-webkit-overflow-scrolling:touch}
 
 /* Responsive */
 @media(max-width:1200px){.cards{grid-template-columns:repeat(3,1fr)}}
@@ -831,7 +831,7 @@ tr:hover td{background:rgba(255,255,255,.05)}
 .budget-warn-100{background:var(--red-bg);color:var(--red)}
 
 /* Heatmap */
-.heatmap-wrap{overflow-x:auto}
+.heatmap-wrap{overflow-x:clip}
 .heatmap-canvas{border-radius:4px}
 .heatmap-legend{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:10px;color:var(--muted)}
 .heatmap-legend .bar{width:120px;height:8px;border-radius:4px;background:linear-gradient(90deg,#1e1b4b,#4338ca,#818cf8,#c7d2fe)}
@@ -1491,20 +1491,23 @@ function render(d){
   const modR=allModels.map(([k,v])=>[k,fmt(v.count),fmt(v.input),fmt(v.output),fmt(v.cache_read),fmt(v.input+v.output+v.cache_read),fmtC(v.cost)]);
   mkT($('#tModel'),[t('thModel'),t('thMsgs'),t('thInput'),t('thOutput'),t('thCache'),t('thTotal'),t('thCost')],modR);
 
-  // Recent messages
+  // Recent messages — precompute session totals from sessions data
   if(d.recent&&d.recent.length){
+    var sessMap={};
+    (d.sessions||[]).forEach(function(s){sessMap[s.id]=s});
     const recR=d.recent.map(r=>{
       const ts=r.timestamp?r.timestamp.replace('T',' ').slice(0,16):'';
       const sm=r.summary?r.summary.replace(/^[\s﻿\xA0]+|[\s﻿\xA0]+$/g,''):'';
       const label=sm?truncW(sm,100):r.session.substring(0,12)+'...';
-      const cnt=r.count||1;
-      const isSess=cnt>1;
-      const sessTotal=(r.input||0)+(r.cache_read||0)+(r.cache_create||0);
-      const msgTotal=isSess?Math.round(sessTotal/cnt):sessTotal;
-      const outp=isSess?Math.round((r.output||0)/cnt):(r.output||0);
+      // Message-level input (this record)
+      const msgInput=(r.input||0)+(r.cache_read||0)+(r.cache_create||0);
+      // Session-level total from sessions aggregation
+      const sess=sessMap[r.session];
+      const sessInput=sess?(sess.input||0)+(sess.cache_read||0)+(sess.cache_create||0):msgInput;
       const sessLabel=lang==='zh'?'会话':'session';
-      const sessTag=isSess?'<span class="badge" style="font-size:9px;padding:1px 4px;margin-left:4px;background:rgba(251,191,36,.2);color:#fbbf24">'+sessLabel+' ('+cnt+')</span>':'';
-      return[ts,badge(r.app)+sessTag,r.model,fmt(sessTotal),fmt(msgTotal),fmt(outp),label]
+      const cnt=sess?sess.count:1;
+      const sessTag=cnt>1?'<span class="badge" style="font-size:9px;padding:1px 4px;margin-left:4px;background:rgba(251,191,36,.2);color:#fbbf24">'+sessLabel+' ('+cnt+')</span>':'';
+      return[ts,badge(r.app)+sessTag,r.model,fmt(sessInput),fmt(msgInput),fmt(r.output||0),label]
     });
     mkT($('#tRecent'),[t('thTime'),t('thApp'),t('thModel'),lang==='zh'?'会话总输入':'Sess Input',lang==='zh'?'消息总输入':'Msg Input',t('thOutput'),t('thSummary')],recR);
   }
