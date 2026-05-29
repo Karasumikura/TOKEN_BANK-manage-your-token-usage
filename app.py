@@ -814,6 +814,14 @@ tr:hover td{background:rgba(255,255,255,.05)}
             <div><div style="font-size:13px;font-weight:600" data-i18n="numFmt">Number Format</div><div style="font-size:11px;color:var(--muted);margin-top:2px" data-i18n="numFmtDesc">万/亿 or K/M/B</div></div>
             <div class="toggle-group" id="numFmtToggle"><button onclick="setNumFmt('en')">K/M</button><button class="active" onclick="setNumFmt('cn')">万/亿</button></div>
           </div>
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <div><div style="font-size:13px;font-weight:600" data-i18n="autoRefresh">Auto Refresh</div><div style="font-size:11px;color:var(--muted);margin-top:2px" data-i18n="autoRefreshDesc">Automatically reload data from disk on a timer</div></div>
+            <div class="toggle-group" id="autoRefreshToggle"><button onclick="setAutoRefresh('off')">Off</button><button class="active" onclick="setAutoRefresh('on')">On</button></div>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <div><div style="font-size:13px;font-weight:600" data-i18n="refreshInterval">Refresh Interval</div><div style="font-size:11px;color:var(--muted);margin-top:2px" data-i18n="refreshIntervalDesc">Time interval between auto-refreshes (seconds)</div></div>
+            <div class="toggle-group" id="intervalToggle"><button onclick="setRefreshInterval(15)">15s</button><button class="active" onclick="setRefreshInterval(30)">30s</button><button onclick="setRefreshInterval(60)">60s</button><button onclick="setRefreshInterval(120)">120s</button></div>
+          </div>
         </div>
       </div>
       <div class="panel">
@@ -882,6 +890,8 @@ const T={
     savePricing:'Save Pricing',resetPricing:'Reset to Defaults',addModel:'+ Add Model',deleteModel:'Delete',
     noCostData:'No cost data available',singleModel:'Only one model - no distribution chart needed',
     topSessions:'Top Sessions',
+    autoRefresh:'Auto Refresh',autoRefreshDesc:'Automatically reload data from disk on a timer',
+    refreshInterval:'Refresh Interval',refreshIntervalDesc:'Time interval between auto-refreshes (seconds)',
   },
   zh:{
     overview:'概览',daily:'使用报告',projects:'项目',sessions:'会话',compare:'对比',
@@ -910,6 +920,8 @@ const T={
     savePricing:'保存计费',resetPricing:'恢复默认',addModel:'+ 添加模型',deleteModel:'删除',
     noCostData:'暂无费用数据',singleModel:'仅一个模型，无需分布图',
     topSessions:'会话排行',
+    autoRefresh:'自动刷新',autoRefreshDesc:'定时自动从磁盘重新加载数据',
+    refreshInterval:'刷新间隔',refreshIntervalDesc:'自动刷新的时间间隔（秒）',
   }
 };
 function t(k){return(T[lang]&&T[lang][k])||T.en[k]||k}
@@ -920,15 +932,49 @@ function lsSet(k,v){try{localStorage.setItem(k,v)}catch(e){}}
 function setLang(l){lang=l;lsSet('tb-lang',l);numFmt=(l==='zh'?'cn':'en');lsSet('tb-numfmt',numFmt);syncSettingsUI();applyLang()}
 function setTheme(th){document.documentElement.setAttribute('data-theme',th);lsSet('tb-theme',th);syncSettingsUI()}
 function setNumFmt(f){numFmt=f;lsSet('tb-numfmt',f);syncSettingsUI();if(fullData){render(fullData);renderDaily(fullData)}}
+
+// ── Auto-refresh ──
+var autoRefreshEnabled=true;
+var refreshIntervalSec=30;
+var _autoRefreshTimer=null;
+function setAutoRefresh(v){
+  autoRefreshEnabled=v==='on';
+  lsSet('tb-autorefresh',v);
+  syncSettingsUI();
+  startAutoRefresh();
+}
+function setRefreshInterval(sec){
+  refreshIntervalSec=sec;
+  lsSet('tb-refreshinterval',String(sec));
+  syncSettingsUI();
+  startAutoRefresh();
+}
+function startAutoRefresh(){
+  if(_autoRefreshTimer){clearInterval(_autoRefreshTimer);_autoRefreshTimer=null}
+  if(autoRefreshEnabled&&refreshIntervalSec>0){
+    _autoRefreshTimer=setInterval(function(){
+      pywebview.api.reload().then(function(r){
+        var d=JSON.parse(r);fullData=d;
+        render(d);renderDaily(d);
+        if(d.daily.length){allDates=d.daily.map(function(x){return x.date})}
+        $('#status').textContent=t('loaded')+' '+d.summary.total_records+' '+t('loadedSuff');
+      });
+    },refreshIntervalSec*1000);
+  }
+}
 function syncSettingsUI(){
   var lt=$('#langToggle');if(lt)lt.querySelectorAll('button').forEach(function(b){b.classList.toggle('active',b.textContent===lang.toUpperCase())});
   var tt=$('#themeToggle');if(tt)tt.querySelectorAll('button').forEach(function(b){b.classList.toggle('active',b.textContent.toLowerCase()===document.documentElement.getAttribute('data-theme'))});
   var nt=$('#numFmtToggle');if(nt)nt.querySelectorAll('button').forEach(function(b){b.classList.toggle('active',b.textContent===(numFmt==='cn'?'万/亿':'K/M'))});
+  var ar=$('#autoRefreshToggle');if(ar)ar.querySelectorAll('button').forEach(function(b){b.classList.toggle('active',b.textContent.toLowerCase()===(autoRefreshEnabled?'on':'off'))});
+  var it=$('#intervalToggle');if(it)it.querySelectorAll('button').forEach(function(b){b.classList.toggle('active',b.textContent===refreshIntervalSec+'s')});
 }
 function initSettings(){
   var savedTheme=lsGet('tb-theme','light');
   document.documentElement.setAttribute('data-theme',savedTheme);
   numFmt=lsGet('tb-numfmt',lang==='zh'?'cn':'en');
+  autoRefreshEnabled=lsGet('tb-autorefresh','on')==='on';
+  refreshIntervalSec=parseInt(lsGet('tb-refreshinterval','30'),10)||30;
   syncSettingsUI();
   applyLang();
 }
@@ -1253,6 +1299,7 @@ function reload(){
       $('#c2s').value=allDates[0];$('#c2e').value=allDates[mid-1];
     }
     $('#status').textContent=t('loaded')+' '+d.summary.total_records+' '+t('loadedSuff');
+    startAutoRefresh();
     var overlay=$('#loadingOverlay');
     if(overlay){overlay.classList.add('fade-out');overlay.addEventListener('transitionend',function(){overlay.remove()})}
   });
