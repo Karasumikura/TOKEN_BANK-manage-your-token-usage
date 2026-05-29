@@ -1486,7 +1486,7 @@ function render(d){
       const ti=inp+crd+(isSess?Math.round((r.cache_create||0)/cnt):(r.cache_create||0));
       const cost=isSess?(r.cost||0)/cnt:(r.cost||0);
       const sessLabel=lang==='zh'?'会话':'session';
-      const sessTag=isSess?'<span class="badge" style="font-size:9px;padding:1px 4px;margin-left:4px;background:rgba(251,191,36,.2);color:#fbbf24">'+sessLabel+' ('+cnt+)</span>':'';
+      const sessTag=isSess?'<span class="badge" style="font-size:9px;padding:1px 4px;margin-left:4px;background:rgba(251,191,36,.2);color:#fbbf24">'+sessLabel+' ('+cnt+')</span>':'';
       return[ts,badge(r.app)+sessTag,r.model,fmt(ti),fmt(inp),fmt(outp),fmtC(cost),label]
     });
     mkT($('#tRecent'),[t('thTime'),t('thApp'),t('thModel'),t('thTotalInput'),t('thNonCacheInput'),t('thOutput'),lang==='zh'?'平均费用':'Avg Cost',t('thSummary')],recR);
@@ -2268,12 +2268,16 @@ function renderMiniCards(){
 }
 
 // ── Load ──
+function _removeOverlay(){var o=$('#loadingOverlay');if(o){o.classList.add('fade-out');setTimeout(function(){if(o.parentNode)o.remove()},1500)}}
 function reload(){
   $('#status').textContent=t('loading');
   pywebview.api.reload().then(function(r){
     var d=JSON.parse(r);fullData=d;
-    render(d);renderModelTrends();checkBudget();if($('#s-budget.active'))renderBudget();
-    if(d.daily.length){
+    try{render(d)}catch(e){console.error('render error:',e)}
+    try{renderModelTrends()}catch(e){console.error('trends error:',e)}
+    try{checkBudget()}catch(e){console.error('budget error:',e)}
+    try{if($('#s-budget.active'))renderBudget()}catch(e){console.error('budget render error:',e)}
+    if(d.daily&&d.daily.length){
       allDates=d.daily.map(function(x){return x.date});
       $('#dStart').value=d.daily[0].date;$('#dEnd').value=d.daily[d.daily.length-1].date;
     }
@@ -2283,11 +2287,14 @@ function reload(){
       $('#c2s').value=allDates[0];$('#c2e').value=allDates[mid-1];
     }
     // Default to 1D view
-    if(allDates.length){presetDaily(1)}else{renderDaily(d)}
+    try{if(allDates.length){presetDaily(1)}else{renderDaily(d)}}catch(e){console.error('daily render error:',e)}
     $('#status').textContent=t('loaded')+' '+d.summary.total_records+' '+t('loadedSuff');
     startAutoRefresh();
-    var overlay=$('#loadingOverlay');
-    if(overlay){overlay.classList.add('fade-out');overlay.addEventListener('transitionend',function(){overlay.remove()})}
+    _removeOverlay();
+  }).catch(function(e){
+    console.error('Load error:',e);
+    $('#status').textContent='Error: '+e;
+    _removeOverlay();
   });
 }
 
