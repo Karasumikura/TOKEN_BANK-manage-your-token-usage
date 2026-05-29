@@ -12,6 +12,9 @@
 - **Granular Cost Tracking** — Customizable model pricing down to Input / Output / Cache Read dimensions, with costs calculated automatically.
 - **Period Comparison** — Compare any two date ranges side-by-side with one-click presets (Today vs Yesterday, This Week vs Last Week, etc.) and clear diff indicators.
 - **Native Desktop Experience** — Powered by pywebview for native window rendering, with system tray support, dark/light themes, and Chinese/English localization.
+- **Smart Budget Alerts** — Set daily/monthly spending limits with automatic warnings when approaching or exceeding thresholds.
+- **Data Export & Reports** — One-click CSV export and auto-generated usage summary reports for easy sharing and analysis.
+- **Desktop Mini View** — Compact always-on-top window for real-time monitoring from a desktop corner.
 
 ## Feature Details
 
@@ -25,6 +28,8 @@ A global dashboard that gives you the full picture at a glance:
 - **By Application Table** — Usage summary grouped by application (Claude Code, Codex, etc.) with color-coded badges.
 - **By Model Table** — Usage and cost summary grouped by model.
 - **Recent Messages** — Quick preview of the last 10 messages.
+- **Efficiency Metrics** — Tokens per message, cost per message, cost per 1K tokens.
+- **Cost Forecast** — Projected monthly cost based on the last 7 days' trend.
 
 ### Usage Report
 
@@ -35,6 +40,8 @@ Deep-dive into usage patterns over time:
 - **Daily Cost Line Chart** — Visualizes cost trends over time.
 - **Detail Table** — Daily aggregated data table.
 - **Hourly Drill-Down** — Selecting a single day automatically switches to a 24-hour granular view, helping you pinpoint high-usage periods.
+- **Usage Heatmap** — Weekday x hour heatmap to visualize peak usage periods at a glance.
+- **Model Trends** — Line chart showing each model's usage share over time.
 
 ### Projects
 
@@ -50,6 +57,8 @@ Track consumption at the individual conversation level:
 - **Top 100 Ranking** — Sessions sorted by total token usage in descending order, so you can quickly find the most token-hungry conversations.
 - Displays application badge, model used, date, message count, input/output tokens, and cost.
 - **Session Summary** — Auto-extracted topic summary for each session.
+- **Session Detail** — Click any session row to expand and view the full message flow with per-message token usage.
+- **Search & Filter** — Filter sessions by keyword, application, or model.
 
 ### Compare
 
@@ -67,7 +76,18 @@ Side-by-side comparison of any two time periods to spot usage trends:
 - **Theme Toggle** — Dark / Light themes with auto-persisted preference.
 - **Number Format** — Chinese units (wan/yi) or Western units (K/M/B), auto-adapts to language, also manually switchable.
 - **Model Pricing Editor** — Freely add/delete models, edit Input / Output / Cache Read prices ($/1M tokens) per model. Saved locally to `~/.tokenbank/pricing.json`. One-click reset to defaults.
+- **Auto Refresh** — Automatically reload data from disk on a timer (default 30s, configurable: 15s/30s/60s/120s, toggleable).
+- **Budget Alerts** — Set daily/monthly spending limits; warning appears at 80% and 100% usage.
 - **Manual Reload** — Re-read all session data from disk and refresh the dashboard.
+
+### Data Export
+
+- **Export CSV** — One-click CSV export from Overview, Usage Report, Projects, Sessions, and Compare sections.
+- **Usage Report** — Auto-generated text summary for the last 7/30 days or all time, including totals, daily averages, top models, and top projects. One-click copy to clipboard.
+
+### Mini Mode
+
+- **Desktop Mini View** — Click the Mini button to switch to a compact always-on-top window showing only core metrics (input/output/cost). Perfect for monitoring from a desktop corner.
 
 ## Screenshots
 

@@ -362,6 +362,110 @@ class Api:
         self._records = None
         return self.get_all()
 
+    def get_session_detail(self, session_id):
+        messages = []
+        for jsonl_path in CLAUDE_PROJECTS.rglob("*.jsonl"):
+            if "subagents" in str(jsonl_path):
+                continue
+            if jsonl_path.stem == session_id:
+                try:
+                    with open(jsonl_path, encoding="utf-8") as f:
+                        for line in f:
+                            try:
+                                obj = json.loads(line.strip())
+                                tp = obj.get("type", "")
+                                ts = obj.get("timestamp", "")
+                                if tp == "assistant":
+                                    usage = obj.get("message", {}).get("usage", {})
+                                    model = obj.get("message", {}).get("model", "")
+                                    inp = usage.get("input_tokens", 0)
+                                    out = usage.get("output_tokens", 0)
+                                    cr = usage.get("cache_read_input_tokens", 0)
+                                    messages.append({"type": "assistant", "ts": ts, "model": model,
+                                                     "input": inp, "output": out, "cache_read": cr,
+                                                     "cost": calc_cost(model, inp, out, cr)})
+                                elif tp in ("human", "user"):
+                                    content = obj.get("message", {}).get("content", "")
+                                    if isinstance(content, list):
+                                        content = " ".join(str(c.get("text", "")) if isinstance(c, dict) else str(c) for c in content)
+                                    messages.append({"type": "user", "ts": ts, "text": str(content)[:300]})
+                                elif tp == "system":
+                                    messages.append({"type": "system", "ts": ts, "text": obj.get("content", "")[:200]})
+                            except json.JSONDecodeError:
+                                continue
+                except (UnicodeDecodeError, OSError):
+                    pass
+                break
+        if not messages:
+            for jsonl_path in CODEX_SESSIONS.rglob("*.jsonl"):
+                if jsonl_path.stem == session_id:
+                    try:
+                        with open(jsonl_path, encoding="utf-8") as f:
+                            for line in f:
+                                try:
+                                    obj = json.loads(line.strip())
+                                    if obj.get("type") == "event_msg":
+                                        payload = obj.get("payload", {})
+                                        mt = payload.get("type", "")
+                                        ts = obj.get("timestamp", "")
+                                        if mt == "user_message":
+                                            messages.append({"type": "user", "ts": ts, "text": str(payload.get("message", ""))[:300]})
+                                        elif mt == "token_count":
+                                            info = payload.get("info", {})
+                                            for field in ("total_token_usage", "last_token_usage"):
+                                                u = info.get(field, {})
+                                                if u.get("total_tokens", 0) > 0:
+                                                    messages.append({"type": "token", "ts": ts,
+                                                                     "input": u.get("input_tokens", 0),
+                                                                     "output": u.get("output_tokens", 0),
+                                                                     "cache_read": u.get("cached_input_tokens", 0)})
+                                                    break
+                                except json.JSONDecodeError:
+                                    continue
+                    except (UnicodeDecodeError, OSError):
+                        pass
+                    break
+        return json.dumps({"id": session_id, "messages": messages})
+
+    def get_heatmap(self):
+        records = self.load_data()
+        heatmap = [[0] * 24 for _ in range(7)]
+        for r in records:
+            ts = r.get("timestamp", "")
+            if ts and len(ts) >= 13:
+                try:
+                    dt = datetime.fromisoformat(ts)
+                    heatmap[dt.weekday()][dt.hour] += r["input"] + r["output"] + r["cache_read"]
+                except (ValueError, IndexError):
+                    pass
+        return json.dumps(heatmap)
+
+    def get_model_daily(self):
+        records = self.load_data()
+        by_date_model = defaultdict(lambda: defaultdict(lambda: {"input": 0, "output": 0, "cache_read": 0, "cost": 0.0}))
+        for r in records:
+            if r["date"]:
+                d = by_date_model[r["date"]][r["model"]]
+                d["input"] += r["input"]
+                d["output"] += r["output"]
+                d["cache_read"] += r["cache_read"]
+                d["cost"] += r["cost"]
+        result = []
+        for date in sorted(by_date_model.keys()):
+            models = {m: dict(v) for m, v in by_date_model[date].items()}
+            result.append({"date": date, "models": models})
+        return json.dumps(result)
+
+    def toggle_mini(self, on):
+        global _app_window
+        if _app_window:
+            _app_window.on_top = (on == "1")
+            if on == "1":
+                _app_window.resize(420, 320)
+            else:
+                _app_window.resize(1280, 800)
+        return json.dumps({"ok": True})
+
     def get_pricing_data(self):
         return json.dumps({"models": MODEL_PRICING, "default": DEFAULT_PRICING, "custom": self._load_custom_pricing()})
 
@@ -698,6 +802,56 @@ tr:hover td{background:rgba(255,255,255,.05)}
   .topbar{padding:0 12px}
   .content{padding:12px}
 }
+
+/* Budget warning */
+.budget-warn{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:12px;font-size:10px;font-weight:600;animation:fadeSlideIn .4s var(--ease-out-back) both}
+.budget-ok{background:var(--green-bg);color:var(--green)}
+.budget-warn-80{background:var(--amber-bg);color:var(--amber)}
+.budget-warn-100{background:var(--red-bg);color:var(--red)}
+
+/* Heatmap */
+.heatmap-wrap{overflow-x:auto}
+.heatmap-canvas{border-radius:4px}
+.heatmap-legend{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:10px;color:var(--muted)}
+.heatmap-legend .bar{width:120px;height:8px;border-radius:4px;background:linear-gradient(90deg,#1e1b4b,#4338ca,#818cf8,#c7d2fe)}
+
+/* Session detail */
+.sess-detail-row{cursor:pointer}
+.sess-detail-row:hover td{background:var(--indigo-bg)}
+.sess-detail{display:none}
+.sess-detail.open{display:table-row}
+.sess-detail td{padding:0;background:var(--surface2)}
+.sess-detail-inner{padding:12px 16px;max-height:300px;overflow-y:auto}
+.sess-msg{display:flex;gap:8px;padding:4px 0;font-size:11px;border-bottom:1px solid var(--border)}
+.sess-msg:last-child{border-bottom:none}
+.sess-msg .role{font-weight:600;min-width:60px;text-transform:uppercase;font-size:10px;letter-spacing:.3px}
+.sess-msg .role-user{color:var(--cyan)}
+.sess-msg .role-assistant{color:var(--indigo)}
+.sess-msg .role-system{color:var(--muted)}
+.sess-msg .body{flex:1;color:var(--dim);word-break:break-all}
+.sess-msg .meta{font-size:10px;color:var(--muted);white-space:nowrap}
+
+/* Search bar */
+.search-bar{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;animation:fadeSlideIn .4s var(--ease-out-back) .1s both}
+.search-bar input,.search-bar select{background:var(--surface2);border:1px solid rgba(127,127,127,.15);color:var(--text);padding:6px 10px;border-radius:6px;font-size:12px;font-family:inherit;transition:all .25s var(--ease-spring)}
+.search-bar input:focus,.search-bar select:focus{border-color:var(--indigo);box-shadow:0 0 0 3px rgba(99,102,241,.15)}
+.search-bar input{width:200px}
+
+/* Export button */
+.export-btn{background:transparent;border:1px solid rgba(127,127,127,.15);color:var(--muted);padding:4px 10px;border-radius:6px;font-size:10px;font-weight:600;cursor:pointer;font-family:inherit;transition:all .25s var(--ease-spring);letter-spacing:.3px}
+.export-btn:hover{border-color:var(--green);color:var(--green);transform:translateY(-1px)}
+
+/* Mini mode */
+.mini .sidebar,.mini .topbar .actions .budget-warn,.mini .content>.section:not(#s-mini){display:none!important}
+.mini .topbar h1{font-size:14px}
+.mini .content{padding:12px}
+#s-mini{display:none}
+.mini #s-mini{display:block!important;animation:none!important;opacity:1!important;transform:none!important}
+.mini-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px}
+.mini-card{background:var(--surface);border-radius:8px;padding:10px 12px;text-align:center}
+.mini-card .label{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+.mini-card .value{font-size:18px;font-weight:700;margin-top:2px}
+.mini-card .sub{font-size:9px;color:var(--muted);margin-top:1px}
 </style>
 </head>
 <body>
@@ -709,8 +863,10 @@ tr:hover td{background:rgba(255,255,255,.05)}
   <div class="topbar">
     <h1>TOKEN<span>BANK</span></h1>
     <div class="actions">
+      <span id="budgetWarn"></span>
       <span id="status" style="font-size:11px;color:var(--muted)"></span>
       <button class="btn btn-ghost btn-sm" id="reloadBtn" onclick="reload()">Reload</button>
+      <button class="btn btn-ghost btn-sm" id="miniBtn" onclick="toggleMini()" title="Mini mode">Mini</button>
     </div>
   </div>
   <div class="sidebar">
@@ -719,6 +875,7 @@ tr:hover td{background:rgba(255,255,255,.05)}
     <div class="nav-item" data-s="projects"><span class="icon">&#128193;</span>Projects</div>
     <div class="nav-item" data-s="sessions"><span class="icon">&#128196;</span>Sessions</div>
     <div class="nav-item" data-s="compare"><span class="icon">&#9878;</span>Compare</div>
+    <div class="nav-item" data-s="report"><span class="icon">&#128203;</span>Report</div>
     <div style="flex:1"></div>
     <div class="nav-item" data-s="settings"><span class="icon">&#9881;</span>Settings</div>
     <div style="padding:8px 14px;font-size:10px;color:var(--muted)">
@@ -740,6 +897,10 @@ tr:hover td{background:rgba(255,255,255,.05)}
         <div class="panel"><h3 data-i18n="byModel"><span class="dot"></span>By Model</h3><div class="table-scroll"><table id="tModel"></table></div></div>
       </div>
       <div class="panel"><h3 data-i18n="recentMsgs"><span class="dot"></span>Recent Messages</h3><div class="table-scroll"><table id="tRecent"></table></div></div>
+      <div class="grid2">
+        <div class="panel"><h3 data-i18n="efficiency"><span class="dot" style="background:var(--green)"></span>Efficiency</h3><div id="efficiencyMetrics"></div></div>
+        <div class="panel"><h3><span class="dot" style="background:var(--amber)"></span><span data-i18n="forecast">Cost Forecast</span><button class="export-btn" style="margin-left:auto" onclick="exportCSV('overview')">CSV</button></h3><div id="forecastPanel"></div></div>
+      </div>
     </div>
 
     <!-- Daily -->
@@ -763,17 +924,26 @@ tr:hover td{background:rgba(255,255,255,.05)}
         <div class="panel"><h3 data-i18n="tokenUsage"><span class="dot"></span>Token Usage</h3><div class="chart-box"><canvas id="cDailyToken"></canvas></div></div>
         <div class="panel"><h3 data-i18n="dailyCost"><span class="dot"></span>Daily Cost</h3><div class="chart-box"><canvas id="cDailyCost"></canvas></div></div>
       </div>
-      <div class="panel"><h3 data-i18n="dailyDetail"><span class="dot"></span>Daily Detail</h3><div class="table-scroll"><table id="tDaily"></table></div></div>
+      <div class="panel"><h3 data-i18n="dailyDetail"><span class="dot"></span>Daily Detail<button class="export-btn" style="margin-left:auto" onclick="exportCSV('daily')">CSV</button></h3><div class="table-scroll"><table id="tDaily"></table></div></div>
+      <div class="grid2">
+        <div class="panel"><h3 data-i18n="heatmap"><span class="dot" style="background:var(--purple)"></span>Heatmap</h3><div class="heatmap-wrap"><canvas id="cHeatmap" class="heatmap-canvas" width="600" height="180"></canvas></div><div class="heatmap-legend"><span data-i18n="low">Low</span><div class="bar"></div><span data-i18n="high">High</span></div></div>
+        <div class="panel"><h3 data-i18n="modelTrends"><span class="dot" style="background:var(--pink)"></span>Model Trends</h3><div class="chart-box"><canvas id="cModelTrends"></canvas></div></div>
+      </div>
     </div>
 
     <!-- Projects -->
     <div class="section" id="s-projects">
-      <div class="panel"><h3 data-i18n="perProject"><span class="dot"></span>Per-Project Usage</h3><div class="table-scroll"><table id="tProject"></table></div></div>
+      <div class="panel"><h3 data-i18n="perProject"><span class="dot"></span>Per-Project Usage<button class="export-btn" style="margin-left:auto" onclick="exportCSV('projects')">CSV</button></h3><div class="table-scroll"><table id="tProject"></table></div></div>
     </div>
 
     <!-- Sessions -->
     <div class="section" id="s-sessions">
-      <div class="panel"><h3 data-i18n="topSessions"><span class="dot"></span>Top Sessions by Usage</h3><div class="table-scroll"><table id="tSession"></table></div></div>
+      <div class="search-bar">
+        <input type="text" id="sessSearch" placeholder="Search..." oninput="filterSessions()">
+        <select id="sessAppFilter" onchange="filterSessions()"><option value="">All Apps</option></select>
+        <select id="sessModelFilter" onchange="filterSessions()"><option value="">All Models</option></select>
+      </div>
+      <div class="panel"><h3 data-i18n="topSessions"><span class="dot"></span>Top Sessions by Usage<button class="export-btn" style="margin-left:auto" onclick="exportCSV('sessions')">CSV</button></h3><div class="table-scroll"><table id="tSession"></table></div></div>
     </div>
 
     <!-- Compare -->
@@ -795,7 +965,28 @@ tr:hover td{background:rgba(255,255,255,.05)}
         <div class="panel"><h3><span class="dot" style="background:var(--cyan)"></span><span data-i18n="periodA">Period A</span></h3><div class="table-scroll"><table id="tC1"></table></div></div>
         <div class="panel"><h3><span class="dot" style="background:var(--amber)"></span><span data-i18n="periodB">Period B</span></h3><div class="table-scroll"><table id="tC2"></table></div></div>
       </div>
-      <div class="panel"><h3 data-i18n="compChart"><span class="dot"></span>Comparison Chart</h3><div class="chart-box"><canvas id="cCompare"></canvas></div></div>
+      <div class="panel"><h3 data-i18n="compChart"><span class="dot"></span>Comparison Chart<button class="export-btn" style="margin-left:auto" onclick="exportCSV('compare')">CSV</button></h3><div class="chart-box"><canvas id="cCompare"></canvas></div></div>
+    </div>
+
+    <!-- Report -->
+    <div class="section" id="s-report">
+      <div class="panel">
+        <h3><span class="dot" style="background:var(--green)"></span><span data-i18n="report">Usage Report</span><button class="export-btn" style="margin-left:auto" onclick="copyReport()" data-i18n="copyReport">Copy</button></h3>
+        <div style="display:flex;gap:8px;margin-bottom:12px">
+          <button class="btn btn-ghost btn-sm" onclick="genReport(7)" data-i18n="last7d">Last 7 Days</button>
+          <button class="btn btn-ghost btn-sm" onclick="genReport(30)" data-i18n="last30d">Last 30 Days</button>
+          <button class="btn btn-ghost btn-sm" onclick="genReport(0)" data-i18n="allTime">All Time</button>
+        </div>
+        <pre id="reportText" style="font-size:12px;line-height:1.6;color:var(--dim);white-space:pre-wrap;word-break:break-all;max-height:500px;overflow-y:auto;background:var(--surface2);padding:14px;border-radius:8px"></pre>
+      </div>
+    </div>
+
+    <!-- Mini mode -->
+    <div class="section" id="s-mini">
+      <div class="mini-cards" id="miniCards"></div>
+      <div style="text-align:center">
+        <button class="btn btn-primary btn-sm" onclick="toggleMini()" data-i18n="restoreFull">Restore Full View</button>
+      </div>
     </div>
 
     <!-- Settings -->
@@ -822,6 +1013,14 @@ tr:hover td{background:rgba(255,255,255,.05)}
           <div style="display:flex;align-items:center;justify-content:space-between">
             <div><div style="font-size:13px;font-weight:600" data-i18n="refreshInterval">Refresh Interval</div><div style="font-size:11px;color:var(--muted);margin-top:2px" data-i18n="refreshIntervalDesc">Time interval between auto-refreshes (seconds)</div></div>
             <div class="toggle-group" id="intervalToggle"><button onclick="setRefreshInterval(15)">15s</button><button class="active" onclick="setRefreshInterval(30)">30s</button><button onclick="setRefreshInterval(60)">60s</button><button onclick="setRefreshInterval(120)">120s</button></div>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <div><div style="font-size:13px;font-weight:600" data-i18n="dailyBudget">Daily Budget</div><div style="font-size:11px;color:var(--muted);margin-top:2px" data-i18n="dailyBudgetDesc">USD daily spending limit (0 = disabled)</div></div>
+            <input type="number" id="dailyBudgetInput" min="0" step="1" value="0" style="width:80px;background:var(--surface2);border:1px solid rgba(127,127,127,.15);color:var(--text);padding:5px 8px;border-radius:6px;font-size:12px;font-family:inherit" onchange="setBudget()">
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <div><div style="font-size:13px;font-weight:600" data-i18n="monthlyBudget">Monthly Budget</div><div style="font-size:11px;color:var(--muted);margin-top:2px" data-i18n="monthlyBudgetDesc">USD monthly spending limit (0 = disabled)</div></div>
+            <input type="number" id="monthlyBudgetInput" min="0" step="1" value="0" style="width:80px;background:var(--surface2);border:1px solid rgba(127,127,127,.15);color:var(--text);padding:5px 8px;border-radius:6px;font-size:12px;font-family:inherit" onchange="setBudget()">
           </div>
         </div>
       </div>
@@ -893,6 +1092,18 @@ const T={
     topSessions:'Top Sessions',
     autoRefresh:'Auto Refresh',autoRefreshDesc:'Automatically reload data from disk on a timer',
     refreshInterval:'Refresh Interval',refreshIntervalDesc:'Time interval between auto-refreshes (seconds)',
+    dailyBudget:'Daily Budget',dailyBudgetDesc:'USD daily spending limit (0 = disabled)',
+    monthlyBudget:'Monthly Budget',monthlyBudgetDesc:'USD monthly spending limit (0 = disabled)',
+    efficiency:'Efficiency',forecast:'Cost Forecast',
+    tokPerMsg:'Tokens/Msg',costPerMsg:'Cost/Msg',costPer1k:'Cost/1K Tokens',
+    projMonthCost:'Projected monthly cost',basedOn:'Based on',
+    heatmap:'Usage Heatmap',modelTrends:'Model Trends',
+    low:'Low',high:'High',mo:'Mo',tu:'Tu',we:'We',th:'Th',fr:'Fr',sa:'Sa',su:'Su',
+    report:'Usage Report',copyReport:'Copy',last7d:'Last 7 Days',last30d:'Last 30 Days',allTime:'All Time',
+    restoreFull:'Restore Full View',miniMode:'Mini',
+    reportTitle:'TOKENBANK Usage Report',reportPeriod:'Period',reportTotal:'Total',reportAvg:'Daily Avg',
+    reportTopModels:'Top Models',reportTopProjects:'Top Projects',
+    exported:'Exported',noData:'No data',
   },
   zh:{
     overview:'概览',daily:'使用报告',projects:'项目',sessions:'会话',compare:'对比',
@@ -923,6 +1134,18 @@ const T={
     topSessions:'会话排行',
     autoRefresh:'自动刷新',autoRefreshDesc:'定时自动从磁盘重新加载数据',
     refreshInterval:'刷新间隔',refreshIntervalDesc:'自动刷新的时间间隔（秒）',
+    dailyBudget:'每日预算',dailyBudgetDesc:'每日费用上限美元（0 = 不限制）',
+    monthlyBudget:'每月预算',monthlyBudgetDesc:'每月费用上限美元（0 = 不限制）',
+    efficiency:'效率指标',forecast:'费用预测',
+    tokPerMsg:'Token/消息',costPerMsg:'费用/消息',costPer1k:'费用/千Token',
+    projMonthCost:'预计本月费用',basedOn:'基于',
+    heatmap:'使用热力图',modelTrends:'模型趋势',
+    low:'低',high:'高',mo:'一',tu:'二',we:'三',th:'四',fr:'五',sa:'六',su:'日',
+    report:'使用报告',copyReport:'复制',last7d:'近7天',last30d:'近30天',allTime:'全部',
+    restoreFull:'恢复完整视图',miniMode:'迷你',
+    reportTitle:'TOKENBANK 使用报告',reportPeriod:'时段',reportTotal:'合计',reportAvg:'日均',
+    reportTopModels:'热门模型',reportTopProjects:'热门项目',
+    exported:'已导出',noData:'暂无数据',
   }
 };
 function t(k){return(T[lang]&&T[lang][k])||T.en[k]||k}
@@ -976,6 +1199,10 @@ function initSettings(){
   numFmt=lsGet('tb-numfmt',lang==='zh'?'cn':'en');
   autoRefreshEnabled=lsGet('tb-autorefresh','on')==='on';
   refreshIntervalSec=parseInt(lsGet('tb-refreshinterval','30'),10)||30;
+  budgetDaily=parseFloat(lsGet('tb-budget-daily','0'))||0;
+  budgetMonthly=parseFloat(lsGet('tb-budget-monthly','0'))||0;
+  var dbi=$('#dailyBudgetInput');if(dbi)dbi.value=budgetDaily;
+  var mbi=$('#monthlyBudgetInput');if(mbi)mbi.value=budgetMonthly;
   syncSettingsUI();
   applyLang();
 }
@@ -1102,6 +1329,39 @@ function render(d){
     return[fmt(s.total),badge(s.app),s.model,s.date,fmt(s.count),fmt(s.input),fmt(s.output),fmtC(s.cost),label]
   });
   mkT($('#tSession'),[t('thTotal'),t('thApp'),t('thModel'),t('thDate'),t('thMsgs'),t('thInput'),t('thOutput'),t('thCost'),t('thSession')],sessR);
+  // Session detail + search support
+  _allSessionRows=[];
+  var apps={},models={};
+  var tbody=$('#tSession').querySelector('tbody');
+  if(tbody){
+    var trs=tbody.querySelectorAll('tr');
+    d.sessions.forEach(function(s,i){
+      var tr=trs[i];if(!tr)return;
+      tr.classList.add('sess-detail-row');
+      tr.style.cursor='pointer';
+      tr.setAttribute('onclick','toggleSessionDetail("'+s.id+'",this)');
+      var detailTr=document.createElement('tr');
+      detailTr.className='sess-detail';detailTr.dataset.id=s.id;
+      detailTr.innerHTML='<td colspan="9"></td>';
+      tr.parentNode.insertBefore(detailTr,tr.nextSibling);
+      var txt=(s.summary||'')+' '+s.id+' '+s.model+' '+s.app;
+      _allSessionRows.push({tr:tr,app:s.app,model:s.model,text:txt.toLowerCase()});
+      apps[s.app]=true;models[s.model]=true;
+    });
+  }
+  // Populate filter dropdowns
+  var appSel=$('#sessAppFilter');if(appSel){
+    var val=appSel.value;
+    appSel.innerHTML='<option value="">'+(lang==='zh'?'全部应用':'All Apps')+'</option>'+Object.keys(apps).map(function(a){return'<option value="'+a+'">'+a.toUpperCase()+'</option>'}).join('');
+    appSel.value=val;
+  }
+  var modSel=$('#sessModelFilter');if(modSel){
+    var val=modSel.value;
+    modSel.innerHTML='<option value="">'+(lang==='zh'?'全部模型':'All Models')+'</option>'+Object.keys(models).map(function(m){return'<option value="'+m+'">'+m+'</option>'}).join('');
+    modSel.value=val;
+  }
+  // Efficiency + Forecast + Budget
+  renderEfficiency();renderForecast();checkBudget();
 }
 
 // ── Daily with filter ──
@@ -1136,6 +1396,7 @@ function renderDaily(data){
   mkT($('#tDaily'),[t('thDate'),t('thMsgs'),t('thInput'),t('thOutput'),t('thCache'),t('thTotal'),t('thCost')],rows);
   var detail=$$('#s-daily .panel h3[data-i18n]');
   detail.forEach(function(el){if(el.dataset.i18n==='dailyDetail'){el.lastChild.textContent=t('dailyDetail')}});
+  renderHeatmap();renderModelTrends();
 }
 
 function renderHourly(data){
@@ -1306,6 +1567,281 @@ function savePricing(){
 }
 function resetPricing(){
   pywebview.api.reset_pricing().then(function(){loadPricingEditor();pywebview.api.reload().then(function(r){var d=JSON.parse(r);fullData=d;render(d);renderDaily(d)})});
+}
+
+// ── Budget ──
+var budgetDaily=0,budgetMonthly=0;
+function setBudget(){
+  budgetDaily=parseFloat($('#dailyBudgetInput').value)||0;
+  budgetMonthly=parseFloat($('#monthlyBudgetInput').value)||0;
+  lsSet('tb-budget-daily',String(budgetDaily));
+  lsSet('tb-budget-monthly',String(budgetMonthly));
+  checkBudget();
+}
+function checkBudget(){
+  if(!fullData)return;
+  var el=$('#budgetWarn');if(!el)return;
+  var today=new Date().toISOString().slice(0,10);
+  var thisMonth=today.slice(0,7);
+  var todayCost=0,monthCost=0;
+  (fullData.daily||[]).forEach(function(d){
+    if(d.date===today)todayCost=d.cost;
+    if(d.date&&d.date.startsWith(thisMonth))monthCost+=d.cost;
+  });
+  var msgs=[];
+  if(budgetDaily>0){
+    var pct=todayCost/budgetDaily*100;
+    if(pct>=100)msgs.push({t:'$'+todayCost.toFixed(2)+'/'+budgetDaily,c:'budget-warn-100'});
+    else if(pct>=80)msgs.push({t:'$'+todayCost.toFixed(2)+'/'+budgetDaily,c:'budget-warn-80'});
+  }
+  if(budgetMonthly>0){
+    var pct=monthCost/budgetMonthly*100;
+    if(pct>=100)msgs.push({t:'M $'+monthCost.toFixed(2)+'/'+budgetMonthly,c:'budget-warn-100'});
+    else if(pct>=80)msgs.push({t:'M $'+monthCost.toFixed(2)+'/'+budgetMonthly,c:'budget-warn-80'});
+  }
+  if(msgs.length){
+    el.innerHTML=msgs.map(function(m){return'<span class="budget-warn '+m.c+'">'+m.t+'</span>'}).join('');
+  }else{el.innerHTML=''}
+}
+
+// ── Forecast ──
+function renderForecast(){
+  if(!fullData||!fullData.daily||!fullData.daily.length)return;
+  var el=$('#forecastPanel');if(!el)return;
+  var dd=fullData.daily;
+  var n=Math.min(dd.length,7);
+  var recent=dd.slice(-n);
+  var avgCost=recent.reduce(function(s,d){return s+d.cost},0)/n;
+  var daysInMonth=new Date(new Date().getFullYear(),new Date().getMonth()+1,0).getDate();
+  var projCost=avgCost*daysInMonth;
+  var html='<div style="font-size:24px;font-weight:700;color:var(--amber)">'+fmtC(projCost)+'</div>';
+  html+='<div style="font-size:11px;color:var(--muted);margin-top:4px">'+t('projMonthCost')+'</div>';
+  html+='<div style="font-size:10px;color:var(--muted);margin-top:2px">'+t('basedOn')+' '+n+'d avg: '+fmtC(avgCost)+'/day</div>';
+  el.innerHTML=html;
+}
+
+// ── Efficiency ──
+function renderEfficiency(){
+  if(!fullData)return;
+  var el=$('#efficiencyMetrics');if(!el)return;
+  var s=fullData.summary;
+  var totalMsg=s.total_records||1;
+  var totalTokens=(s.total_input_full||s.total_input)+s.total_output;
+  var tokPerMsg=Math.round(totalTokens/totalMsg);
+  var costPerMsg=s.total_cost/totalMsg;
+  var costPer1k=s.total_cost>0?s.total_cost/(totalTokens/1000):0;
+  var html='<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px">';
+  html+='<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">'+t('tokPerMsg')+'</div><div style="font-size:20px;font-weight:700;color:var(--cyan);margin-top:4px">'+fmt(tokPerMsg)+'</div></div>';
+  html+='<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">'+t('costPerMsg')+'</div><div style="font-size:20px;font-weight:700;color:var(--amber);margin-top:4px">'+fmtC(costPerMsg)+'</div></div>';
+  html+='<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">'+t('costPer1k')+'</div><div style="font-size:20px;font-weight:700;color:var(--red);margin-top:4px">'+fmtC(costPer1k)+'</div></div>';
+  html+='</div>';
+  el.innerHTML=html;
+}
+
+// ── Heatmap ──
+function renderHeatmap(){
+  pywebview.api.get_heatmap().then(function(r){
+    var data=JSON.parse(r);
+    var canvas=document.getElementById('cHeatmap');
+    if(!canvas)return;
+    var ctx=canvas.getContext('2d');
+    var dpr=window.devicePixelRatio||1;
+    var cw=600,ch=180;
+    canvas.width=cw*dpr;canvas.height=ch*dpr;
+    canvas.style.width=cw+'px';canvas.style.height=ch+'px';
+    ctx.scale(dpr,dpr);
+    ctx.clearRect(0,0,cw,ch);
+    var maxVal=0;
+    data.forEach(function(row){row.forEach(function(v){if(v>maxVal)maxVal=v})});
+    if(maxVal===0)return;
+    var cellW=22,cellH=20,padL=28,padT=22;
+    var days=[t('mo'),t('tu'),t('we'),t('th'),t('fr'),t('sa'),t('su')];
+    ctx.font='9px Inter,sans-serif';ctx.fillStyle='#71717a';
+    for(var h=0;h<24;h++){ctx.fillText(h+'',padL+h*cellW+2,14)}
+    for(var d=0;d<7;d++){ctx.fillText(days[d],2,padT+d*cellH+14)}
+    for(var d=0;d<7;d++){
+      for(var h=0;h<24;h++){
+        var v=data[d][h];
+        var intensity=v/maxVal;
+        var r2=Math.round(30+intensity*99);
+        var g2=Math.round(27+intensity*113);
+        var b2=Math.round(75+intensity*173);
+        ctx.fillStyle='rgb('+r2+','+g2+','+b2+')';
+        ctx.fillRect(padL+h*cellW,padT+d*cellH,cellW-2,cellH-2);
+      }
+    }
+  });
+}
+
+// ── Model Trends ──
+function renderModelTrends(){
+  pywebview.api.get_model_daily().then(function(r){
+    var data=JSON.parse(r);
+    if(!data.length)return;
+    var models={};
+    data.forEach(function(d){Object.keys(d.models).forEach(function(m){if(!models[m])models[m]=true})});
+    var modelNames=Object.keys(models);
+    var labels=data.map(function(d){return d.date.slice(5)});
+    var colors=['#818cf8','#22d3ee','#4ade80','#fbbf24','#f87171','#c084fc','#f472b6','#60a5fa','#34d399','#fb923c'];
+    var datasets=modelNames.map(function(m,i){
+      return{label:m,data:data.map(function(d){return d.models[m]?d.models[m].input+d.models[m].output+d.models[m].cache_read:0}),
+             borderColor:colors[i%colors.length],backgroundColor:colors[i%colors.length]+'22',fill:true,tension:.3,borderWidth:1.5}
+    });
+    line('cModelTrends',labels,datasets);
+  });
+}
+
+// ── Export ──
+function exportCSV(section){
+  var csv='',rows=[];
+  if(section==='overview'){
+    if(!fullData)return;
+    var s=fullData.summary;
+    csv='Metric,Value\n';
+    csv+='Records,'+s.total_records+'\n';
+    csv+='Input Tokens,'+(s.total_input_full||s.total_input)+'\n';
+    csv+='Output Tokens,'+s.total_output+'\n';
+    csv+='Cache Read,'+s.total_cache_read+'\n';
+    csv+='Estimated Cost,'+s.total_cost.toFixed(4)+'\n';
+    csv+='Cache Rate,'+s.cache_rate+'%\n';
+  }else if(section==='daily'){
+    rows=extractTableRows('#tDaily');
+  }else if(section==='projects'){
+    rows=extractTableRows('#tProject');
+  }else if(section==='sessions'){
+    rows=extractTableRows('#tSession');
+  }else if(section==='compare'){
+    rows=extractTableRows('#tC1');
+  }
+  if(rows.length>0){
+    csv=rows.map(function(r){return r.join(',')}).join('\n');
+  }
+  downloadFile('tokenbank_'+section+'_'+new Date().toISOString().slice(0,10)+'.csv',csv,'text/csv');
+}
+function extractTableRows(sel){
+  var table=$(sel);if(!table)return[];
+  var rows=[];
+  table.querySelectorAll('thead tr').forEach(function(tr){
+    var cols=[];tr.querySelectorAll('th').forEach(function(th){cols.push('"'+th.textContent.trim()+'"')});rows.push(cols);
+  });
+  table.querySelectorAll('tbody tr').forEach(function(tr){
+    var cols=[];tr.querySelectorAll('td').forEach(function(td){cols.push('"'+td.textContent.trim()+'"')});rows.push(cols);
+  });
+  return rows;
+}
+function downloadFile(name,content,type){
+  var blob=new Blob([content],{type:type});
+  var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();
+}
+
+// ── Report ──
+function genReport(days){
+  if(!fullData)return;
+  var dd=fullData.daily;
+  var filtered=dd;
+  if(days>0&&dd.length>days)filtered=dd.slice(-days);
+  var totalIn=0,totalOut=0,totalCache=0,totalCost=0,totalMsg=0;
+  filtered.forEach(function(d){totalIn+=d.input;totalOut+=d.output;totalCache+=d.cache_read;totalCost+=d.cost;totalMsg+=d.count});
+  var periodLabel=days>0?days+' days':'All time';
+  if(filtered.length>0)periodLabel=filtered[0].date+' ~ '+filtered[filtered.length-1].date;
+  var numDays=filtered.length||1;
+  var lines=[];
+  lines.push('=== '+t('reportTitle')+' ===');
+  lines.push('');
+  lines.push(t('reportPeriod')+': '+periodLabel);
+  lines.push('');
+  lines.push('--- '+t('reportTotal')+' ---');
+  lines.push(t('sRecords')+': '+totalMsg);
+  lines.push(t('sInput')+': '+fmt(totalIn));
+  lines.push(t('sOutput')+': '+fmt(totalOut));
+  lines.push(t('sCache')+': '+fmt(totalCache));
+  lines.push(t('sCost')+': '+fmtC(totalCost));
+  lines.push('');
+  lines.push('--- '+t('reportAvg')+' ---');
+  lines.push(t('sRecords')+'/'+t('daily')+': '+Math.round(totalMsg/numDays));
+  lines.push(t('sInput')+'/'+t('daily')+': '+fmt(Math.round(totalIn/numDays)));
+  lines.push(t('sCost')+'/'+t('daily')+': '+fmtC(totalCost/numDays));
+  lines.push('');
+  lines.push('--- '+t('reportTopModels')+' ---');
+  var models=Object.entries(fullData.by_model).sort(function(a,b){return b[1].input+b[1].output-a[1].input-a[1].output}).slice(0,5);
+  models.forEach(function(m){lines.push('  '+m[0]+': '+fmt(m[1].input+m[1].output)+' tok, '+fmtC(m[1].cost))});
+  lines.push('');
+  lines.push('--- '+t('reportTopProjects')+' ---');
+  fullData.projects.slice(0,5).forEach(function(p){lines.push('  '+p.name+': '+fmt(p.total)+' tok, '+fmtC(p.cost))});
+  $('#reportText').textContent=lines.join('\n');
+}
+function copyReport(){
+  var text=$('#reportText').textContent;
+  if(!text)return;
+  navigator.clipboard.writeText(text);
+}
+
+// ── Session Detail ──
+var _openDetail=null;
+function toggleSessionDetail(sessionId,rowEl){
+  var existing=document.querySelector('.sess-detail.open');
+  if(existing){existing.classList.remove('open');if(existing.dataset.id===sessionId){_openDetail=null;return}}
+  var detailRow=rowEl.nextElementSibling;
+  if(!detailRow||!detailRow.classList.contains('sess-detail'))return;
+  if(detailRow.dataset.loaded){
+    detailRow.classList.add('open');_openDetail=sessionId;return;
+  }
+  pywebview.api.get_session_detail(sessionId).then(function(r){
+    var d=JSON.parse(r);
+    var html='<div class="sess-detail-inner">';
+    d.messages.forEach(function(m){
+      var role=m.type==='user'?'user':m.type==='assistant'?'assistant':'system';
+      var roleLabel=role.toUpperCase();
+      var body='';
+      if(m.text)body=m.text;
+      else if(m.type==='assistant')body='['+m.model+'] in:'+fmt(m.input)+' out:'+fmt(m.output)+' cache:'+fmt(m.cache_read)+' $'+(m.cost||0).toFixed(4);
+      else if(m.type==='token')body='in:'+fmt(m.input)+' out:'+fmt(m.output)+' cache:'+fmt(m.cache_read);
+      var ts=m.ts?m.ts.replace('T',' ').slice(0,19):'';
+      html+='<div class="sess-msg"><span class="role role-'+role+'">'+roleLabel+'</span><span class="body">'+body+'</span><span class="meta">'+ts+'</span></div>';
+    });
+    if(!d.messages.length)html+='<div style="color:var(--muted);font-size:11px">'+t('noData')+'</div>';
+    html+='</div>';
+    detailRow.querySelector('td').innerHTML=html;
+    detailRow.dataset.loaded='1';
+    detailRow.classList.add('open');
+    _openDetail=sessionId;
+  });
+}
+
+// ── Search/Filter ──
+var _allSessionRows=[];
+function filterSessions(){
+  var q=($('#sessSearch').value||'').toLowerCase();
+  var appF=$('#sessAppFilter').value;
+  var modelF=$('#sessModelFilter').value;
+  _allSessionRows.forEach(function(item){
+    var show=true;
+    if(q&&item.text.indexOf(q)<0)show=false;
+    if(appF&&item.app!==appF)show=false;
+    if(modelF&&item.model!==modelF)show=false;
+    item.tr.style.display=show?'':'none';
+    var detail=item.tr.nextElementSibling;
+    if(detail&&detail.classList.contains('sess-detail'))detail.style.display=show?'':'none';
+  });
+}
+
+// ── Mini Mode ──
+var _miniMode=false;
+function toggleMini(){
+  _miniMode=!_miniMode;
+  document.body.classList.toggle('mini',_miniMode);
+  pywebview.api.toggle_mini(_miniMode?'1':'0');
+  if(_miniMode)renderMiniCards();
+}
+function renderMiniCards(){
+  if(!fullData)return;
+  var s=fullData.summary;
+  var totalIn=s.total_input_full||s.total_input;
+  $('#miniCards').innerHTML=[
+    {l:t('sInput'),v:fmt(totalIn),cls:'c-cyan'},
+    {l:t('sOutput'),v:fmt(s.total_output),cls:'c-green'},
+    {l:t('sCost'),v:fmtC(s.total_cost),cls:'c-red'},
+  ].map(function(c){return'<div class="mini-card"><div class="label">'+c.l+'</div><div class="value '+c.cls+'">'+c.v+'</div></div>'}).join('');
 }
 
 // ── Load ──
