@@ -758,6 +758,7 @@ tr:hover td{background:rgba(255,255,255,.05)}
           <button class="btn btn-ghost btn-sm" onclick="presetDaily(0)">All</button>
         </div>
       </div>
+      <div class="cards" id="dailyCards"></div>
       <div class="grid2">
         <div class="panel"><h3 data-i18n="tokenUsage"><span class="dot"></span>Token Usage</h3><div class="chart-box"><canvas id="cDailyToken"></canvas></div></div>
         <div class="panel"><h3 data-i18n="dailyCost"><span class="dot"></span>Daily Cost</h3><div class="chart-box"><canvas id="cDailyCost"></canvas></div></div>
@@ -1105,9 +1106,22 @@ function render(d){
 
 // ── Daily with filter ──
 let fullData=null;
+function renderDailyCards(s){
+  const totalInput=s.total_input_full||s.total_input;
+  const cacheRate=s.cache_rate||0;
+  $('#dailyCards').innerHTML=[
+    {l:t('sRecords'),v:fmt(s.total_records),c:'i1',cls:'c-indigo'},
+    {l:t('sInput'),v:fmt(totalInput),c:'i2',cls:'c-cyan'},
+    {l:t('sOutput'),v:fmt(s.total_output),c:'i3',cls:'c-green'},
+    {l:t('sCache'),v:fmt(s.total_cache_read),c:'i4',cls:'c-purple'},
+    {l:t('sCost'),v:fmtC(s.total_cost),c:'i5',cls:'c-red'},
+    {l:t('sCacheRate'),v:cacheRate.toFixed(1)+'%',c:'i2',cls:'c-cyan'},
+  ].map(c=>`<div class="card ${c.c}"><div class="label">${c.l}</div><div class="value ${c.cls}">${c.v}</div></div>`).join('');
+}
 function renderDaily(data){
   if(!data)return;
   fullData=data;
+  if(data.summary)renderDailyCards(data.summary);
   const dd=data.daily;
   const dates=dd.map(x=>x.date.slice(5));
   line('cDailyToken',dates,[
@@ -1127,6 +1141,15 @@ function renderDaily(data){
 function renderHourly(data){
   if(!data||!data.hourly)return;
   const hh=data.hourly;
+  var hs={total_records:0,total_input:0,total_output:0,total_cache_read:0,total_cache_create:0,total_cost:0,total_input_full:0,cache_rate:0};
+  hh.forEach(function(h){
+    hs.total_records+=h.count;hs.total_input+=h.input;hs.total_output+=h.output;
+    hs.total_cache_read+=h.cache_read;hs.total_cache_create+=h.cache_create;hs.total_cost+=h.cost;
+  });
+  hs.total_input_full=hs.total_input+hs.total_cache_read+hs.total_cache_create;
+  var denom=hs.total_input+hs.total_cache_read+hs.total_cache_create;
+  hs.cache_rate=denom?Math.round(hs.total_cache_read/denom*1000)/10:0;
+  renderDailyCards(hs);
   const hours=hh.map(x=>x.hour);
   line('cDailyToken',hours,[
     {label:t('input'),data:hh.map(x=>x.input),borderColor:'#60a5fa',backgroundColor:'rgba(96,165,250,.1)',fill:true},
