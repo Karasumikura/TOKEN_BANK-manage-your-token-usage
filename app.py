@@ -2020,7 +2020,7 @@ function renderModelRanking(timeModelData,labelFn){
   var ctx=document.getElementById('cModelRanking');if(!ctx)return;
   // Dynamic height based on entry count
   var h=Math.max(200,entries.length*22+40);
-  ctx.canvas.style.height=h+'px';
+  var box=ctx.parentElement;if(box)box.style.height=h+'px';
   charts['cModelRanking']=new Chart(ctx,{type:'bar',data:{labels:labels,datasets:[{data:data,backgroundColor:bg,borderRadius:3}]},
     options:{
       indexAxis:'y',responsive:true,maintainAspectRatio:false,
