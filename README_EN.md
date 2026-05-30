@@ -13,6 +13,9 @@
 ---
 
 <div align="center">
+
+> The screenshots below show the Chinese interface. You can switch to English in Settings.
+
 <img src="PIC/屏幕截图%202026-05-29%20160646.png" width="90%" alt="Overview Dashboard">
 <img src="PIC/屏幕截图%202026-05-29%20160653.png" width="90%" alt="Usage Report">
 <img src="PIC/屏幕截图%202026-05-29%20161301.png" width="90%" alt="Mini View">
