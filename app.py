@@ -4,6 +4,7 @@
 import json
 import os
 import re
+import sqlite3
 import sys
 import threading
 import queue
@@ -24,6 +25,7 @@ HOME = Path.home()
 CLAUDE_PROJECTS = HOME / ".claude" / "projects"
 CODEX_SESSIONS = HOME / ".codex" / "sessions"
 CODEX_ARCHIVED = HOME / ".codex" / "archived_sessions"
+CODEX_DB = HOME / ".codex" / "state_5.sqlite"
 CLINE_BASE = HOME / "AppData" / "Roaming" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev"
 
 # ── Model pricing (USD per 1M tokens) ────────────────────────────────────────
@@ -85,6 +87,8 @@ def load_claude_sessions():
         session_id = jsonl_path.stem
         session_paths[session_id] = str(jsonl_path)
         summary = ""
+        first_prompt = ""
+        sess_records = []
         try:
             with open(jsonl_path, encoding="utf-8") as f:
                 for line in f:
@@ -95,6 +99,14 @@ def load_claude_sessions():
                     if obj.get("type") == "system" and obj.get("subtype") == "away_summary":
                         raw = re.sub(r'^\s+|\s+$', '', obj.get("content", ""))
                         summary = re.sub(r'\s*\(disable recaps in /config\)\s*$', '', raw)
+                    elif obj.get("type") == "user" and not obj.get("isCompactSummary") and not first_prompt:
+                        content = obj.get("message", {}).get("content", "")
+                        if isinstance(content, list):
+                            content = ' '.join(p.get('text','') for p in content if p.get('type')=='text')
+                        content = re.sub(r'^\s+|\s+$', '', content)
+                        # Skip system metadata messages (local-command-caveat, command-name, etc.)
+                        if content and not content.startswith('<'):
+                            first_prompt = content[:160]
                     elif obj.get("type") == "assistant":
                         usage = obj.get("message", {}).get("usage", {})
                         inp = usage.get("input_tokens", 0)
@@ -108,7 +120,7 @@ def load_claude_sessions():
                         local_dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone() if ts else None
                         date_str = local_dt.strftime("%Y-%m-%d") if local_dt else ""
                         ts_local = local_dt.strftime("%Y-%m-%dT%H:%M:%S") if local_dt else ts
-                        records.append({
+                        sess_records.append({
                             "app": "claude", "project": project, "session": session_id,
                             "summary": summary, "model": model, "timestamp": ts_local,
                             "date": date_str,
@@ -117,6 +129,12 @@ def load_claude_sessions():
                         })
         except (UnicodeDecodeError, OSError):
             continue
+        # Apply best available summary to all records for this session
+        best = summary or first_prompt
+        if best:
+            for r in sess_records:
+                r["summary"] = best
+        records.extend(sess_records)
     return records, session_paths
 
 
@@ -153,7 +171,25 @@ def _parse_codex_delta(info):
     return inp, out, cached
 
 
+def _load_codex_titles():
+    """Load session titles from Codex SQLite database."""
+    titles = {}
+    if not CODEX_DB.exists():
+        return titles
+    try:
+        conn = sqlite3.connect(f"file:{CODEX_DB}?mode=ro", uri=True)
+        try:
+            for row in conn.execute("SELECT id, title FROM threads WHERE title IS NOT NULL AND title != ''"):
+                titles[row[0]] = row[1]
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError):
+        pass
+    return titles
+
+
 def load_codex_sessions():
+    codex_titles = _load_codex_titles()
     records = []
     session_paths = {}
     # Collect from both sessions/ and archived_sessions/
@@ -166,6 +202,9 @@ def load_codex_sessions():
         session_id = jsonl_path.stem
         session_paths[session_id] = str(jsonl_path)
         session_date = session_id[8:18] if session_id.startswith("rollout-") and len(session_id) > 18 else ""
+        # Extract UUID from session_id to look up title
+        _uuid_match = re.search(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', session_id)
+        _session_title = codex_titles.get(_uuid_match.group(), "") if _uuid_match else ""
         model = None
         prev_total = None  # (input, output, cached) cumulative from previous event
         try:
@@ -213,7 +252,7 @@ def load_codex_sessions():
                         non_cached = max(0, delta_inp - delta_cached)
                         records.append({
                             "app": "codex", "project": "codex", "session": session_id,
-                            "summary": "", "model": model or "unknown", "timestamp": ts_local,
+                            "summary": _session_title, "model": model or "unknown", "timestamp": ts_local,
                             "date": date_str or session_date,
                             "input": non_cached, "output": delta_out,
                             "cache_read": delta_cached, "cache_create": 0,
@@ -391,6 +430,11 @@ class Api:
         records = [r for r in self.load_data() if start_date <= r["date"] <= end_date]
         proc = self._process(records)
         return json.dumps({"sessions": proc["sessions"], "summary": proc["summary"]})
+
+    def get_budget_dist(self, start_date, end_date):
+        records = [r for r in self.load_data() if start_date <= r["date"] <= end_date]
+        proc = self._process(records)
+        return json.dumps({"by_model": proc["by_model"], "by_app": proc["by_app"]})
 
     def get_hourly_compare(self, date1, date2):
         return json.dumps({
@@ -1202,21 +1246,49 @@ tr:hover td{background:rgba(255,255,255,.05)}
       </div>
       <div class="grid2">
         <div class="panel">
-          <h3><span class="dot" style="background:var(--indigo)"></span><span data-i18n="budgetByModel">By Model</span></h3>
+          <h3><span class="dot" style="background:var(--indigo)"></span><span data-i18n="budgetByModel">By Model</span>
+            <span class="preset" style="margin-left:auto">
+              <button class="btn btn-ghost btn-sm _bdistBtn" data-type="model" data-period="day" onclick="setBudgetDistPeriod('model','day')" data-i18n="bdDay">Day</button>
+              <button class="btn btn-ghost btn-sm _bdistBtn" data-type="model" data-period="week" onclick="setBudgetDistPeriod('model','week')" data-i18n="bdWeek">Week</button>
+              <button class="btn btn-ghost btn-sm _bdistBtn" data-type="model" data-period="month" onclick="setBudgetDistPeriod('model','month')" data-i18n="bdMonth">Month</button>
+              <button class="btn btn-ghost btn-sm _bdistBtn" data-type="model" data-period="total" onclick="setBudgetDistPeriod('model','total')" data-i18n="bdTotal">Total</button>
+            </span>
+          </h3>
           <div class="table-scroll"><table id="tBudgetModel"></table></div>
         </div>
         <div class="panel">
-          <h3><span class="dot" style="background:var(--cyan)"></span><span data-i18n="budgetByApp">By App</span></h3>
+          <h3><span class="dot" style="background:var(--cyan)"></span><span data-i18n="budgetByApp">By App</span>
+            <span class="preset" style="margin-left:auto">
+              <button class="btn btn-ghost btn-sm _bdistBtn" data-type="app" data-period="day" onclick="setBudgetDistPeriod('app','day')" data-i18n="bdDay">Day</button>
+              <button class="btn btn-ghost btn-sm _bdistBtn" data-type="app" data-period="week" onclick="setBudgetDistPeriod('app','week')" data-i18n="bdWeek">Week</button>
+              <button class="btn btn-ghost btn-sm _bdistBtn" data-type="app" data-period="month" onclick="setBudgetDistPeriod('app','month')" data-i18n="bdMonth">Month</button>
+              <button class="btn btn-ghost btn-sm _bdistBtn" data-type="app" data-period="total" onclick="setBudgetDistPeriod('app','total')" data-i18n="bdTotal">Total</button>
+            </span>
+          </h3>
           <div class="table-scroll"><table id="tBudgetApp"></table></div>
         </div>
       </div>
       <div class="panel">
-        <h3><span class="dot" style="background:var(--green)"></span><span data-i18n="budgetPerApp">Per-App Budget</span></h3>
+        <h3><span class="dot" style="background:var(--green)"></span><span data-i18n="budgetPerApp">Per-App Budget</span>
+          <span class="preset" style="margin-left:auto">
+            <button class="btn btn-ghost btn-sm _bdetBtn" data-type="app" data-period="day" onclick="setBudgetDetailPeriod('app','day')" data-i18n="bdDay">Day</button>
+            <button class="btn btn-ghost btn-sm _bdetBtn" data-type="app" data-period="week" onclick="setBudgetDetailPeriod('app','week')" data-i18n="bdWeek">Week</button>
+            <button class="btn btn-ghost btn-sm _bdetBtn" data-type="app" data-period="month" onclick="setBudgetDetailPeriod('app','month')" data-i18n="bdMonth">Month</button>
+            <button class="btn btn-ghost btn-sm _bdetBtn" data-type="app" data-period="total" onclick="setBudgetDetailPeriod('app','total')" data-i18n="bdTotal">Total</button>
+          </span>
+        </h3>
         <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="budgetAppDesc">Monthly limit per application (0 = disabled)</div>
         <div class="table-scroll"><table id="tBudgetAppDetail"></table></div>
       </div>
       <div class="panel">
-        <h3><span class="dot" style="background:var(--pink)"></span><span data-i18n="budgetPerModel">Per-Model Budget</span></h3>
+        <h3><span class="dot" style="background:var(--pink)"></span><span data-i18n="budgetPerModel">Per-Model Budget</span>
+          <span class="preset" style="margin-left:auto">
+            <button class="btn btn-ghost btn-sm _bdetBtn" data-type="model" data-period="day" onclick="setBudgetDetailPeriod('model','day')" data-i18n="bdDay">Day</button>
+            <button class="btn btn-ghost btn-sm _bdetBtn" data-type="model" data-period="week" onclick="setBudgetDetailPeriod('model','week')" data-i18n="bdWeek">Week</button>
+            <button class="btn btn-ghost btn-sm _bdetBtn" data-type="model" data-period="month" onclick="setBudgetDetailPeriod('model','month')" data-i18n="bdMonth">Month</button>
+            <button class="btn btn-ghost btn-sm _bdetBtn" data-type="model" data-period="total" onclick="setBudgetDetailPeriod('model','total')" data-i18n="bdTotal">Total</button>
+          </span>
+        </h3>
         <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="budgetModelDesc">Monthly limit per model (0 = disabled)</div>
         <div class="table-scroll"><table id="tBudgetModelDetail"></table></div>
       </div>
@@ -1380,6 +1452,7 @@ const T={
     budgetPerApp:'Per-App Budget',budgetPerModel:'Per-Model Budget',budgetLimit:'Limit',budgetUsed:'Used',budgetPct:'Usage',
     budgetAppDesc:'Monthly limit per application (0 = disabled)',budgetModelDesc:'Monthly limit per model (0 = disabled)',
     budgetNoAppLimit:'No per-app limits set',budgetNoModelLimit:'No per-model limits set',
+    bdDay:'Day',bdWeek:'Week',bdMonth:'Month',bdTotal:'Total',
     budgetTermLabel:'Budget Term',budgetTermDesc:'Display "Limit" or "Target" for budget values',
     budgetTermLimit:'Limit',budgetTermTarget:'Target',
     hourlyCompare:'Hourly Comparison',cmpPrevDay:'Compare Prev Day',hide:'Hide',
@@ -1435,6 +1508,7 @@ const T={
     budgetPerApp:'按应用预算',budgetPerModel:'按模型预算',budgetLimit:'限额',budgetUsed:'已用',budgetPct:'使用率',
     budgetAppDesc:'每个应用的月度限额（0 = 不限制）',budgetModelDesc:'每个模型的月度限额（0 = 不限制）',
     budgetNoAppLimit:'未设置按应用限额',budgetNoModelLimit:'未设置按模型限额',
+    bdDay:'日',bdWeek:'周',bdMonth:'月',bdTotal:'总',
     budgetTermLabel:'预算用词',budgetTermDesc:'预算数值显示为"限额"或"目标"',
     budgetTermLimit:'限额',budgetTermTarget:'目标',
     hourlyCompare:'逐时对比',cmpPrevDay:'对比前一天',hide:'隐藏',
@@ -1467,6 +1541,10 @@ function setRefreshInterval(sec){
   startAutoRefresh();
 }
 function _refreshCurrentView(){
+  if(_userDailyDays===null||!allDates.length){renderDaily(fullData);return}
+  if(_userDailyDays===0){renderDaily(fullData);return}
+  if(_userDailyDays>0){presetDaily(_userDailyDays);return}
+  // _userDailyDays === -1: custom range, re-apply from date inputs
   var s=$('#dStart').value,e=$('#dEnd').value;
   if(s&&e&&s===e){pywebview.api.get_hourly(s).then(function(r){renderHourly(JSON.parse(r))}).catch(function(e){console.error('hourly error:',e)})}
   else if(s&&e){pywebview.api.get_filtered(s,e).then(function(r){renderDaily(JSON.parse(r))}).catch(function(e){console.error('filtered error:',e)})}
@@ -1682,6 +1760,7 @@ function render(d){
 // ── Daily with filter ──
 let fullData=null;
 let _fullDataAll=null;
+let _userDailyDays=null; // null=full, 0=all, N=preset days, -1=custom range
 function renderDailyCards(s){
   const totalInput=s.total_input_full||s.total_input;
   const cacheRate=s.cache_rate||0;
@@ -1803,11 +1882,13 @@ function renderHourlyCompare(data){
 function applyDaily(){
   const s=$('#dStart').value,e=$('#dEnd').value;
   if(!s||!e)return;
+  _userDailyDays=-1; // custom range
   if(s===e){pywebview.api.get_hourly(s).then(r=>{renderHourly(JSON.parse(r))}).catch(function(e){console.error('hourly error:',e)})}
   else{pywebview.api.get_filtered(s,e).then(r=>{renderDaily(JSON.parse(r))}).catch(function(e){console.error('filtered error:',e)})}
 }
 function presetDaily(n){
   if(!allDates.length)return;
+  _userDailyDays=n;
   if(n===0){renderDaily(fullData);$('#dStart').value=allDates[0];$('#dEnd').value=allDates[allDates.length-1];return}
   const end=allDates[allDates.length-1];
   if(n===1){
@@ -1951,6 +2032,34 @@ function resetPricing(){
 // ── Budget ──
 var budgetDaily=0,budgetMonthly=0,budgetMode='token',budgetTerm='limit';
 var budgetAppModels={};var budgetModelModels={};
+var _budgetDistPeriod={model:'total',app:'total'};
+var _budgetDetailPeriod={model:'total',app:'total'};
+function _bdistDateRange(period){
+  var today=_localDateStr();
+  if(period==='day')return{start:today,end:today};
+  if(period==='week'){
+    var d=new Date();d.setDate(d.getDate()-6);
+    var s=d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2);
+    return{start:s,end:today};
+  }
+  if(period==='month')return{start:_localMonthStr()+'-01',end:today};
+  return null;
+}
+function setBudgetDistPeriod(type,period){
+  _budgetDistPeriod[type]=period;
+  // Sync button active state
+  document.querySelectorAll('._bdistBtn[data-type="'+type+'"]').forEach(function(b){
+    b.classList.toggle('active',b.dataset.period===period);
+  });
+  _refreshBudgetDist();
+}
+function setBudgetDetailPeriod(type,period){
+  _budgetDetailPeriod[type]=period;
+  document.querySelectorAll('._bdetBtn[data-type="'+type+'"]').forEach(function(b){
+    b.classList.toggle('active',b.dataset.period===period);
+  });
+  _refreshBudgetDetail();
+}
 function jumpBudget(){
   $$('.nav-item').forEach(function(x){x.classList.remove('active')});
   $$('.section').forEach(function(x){x.classList.remove('active')});
@@ -1990,33 +2099,129 @@ function _saveBudgetToBackend(){
 }
 function _saveAppBudget(name,val){
   if(val>0)budgetAppModels[name]=val;else delete budgetAppModels[name];
-  _saveBudgetToBackend();_refreshBudgetDist();checkBudget();
+  _saveBudgetToBackend();_refreshBudgetDist();_refreshBudgetDetail();checkBudget();
 }
 function _saveModelBudget(name,val){
   if(val>0)budgetModelModels[name]=val;else delete budgetModelModels[name];
-  _saveBudgetToBackend();_refreshBudgetDist();checkBudget();
+  _saveBudgetToBackend();_refreshBudgetDist();_refreshBudgetDetail();checkBudget();
 }
 function _isEditingBudgetInput(){
   var el=document.activeElement;
   return el&&el.tagName==='INPUT'&&el.type==='number'&&(el.closest('#tBudgetAppDetail')||el.closest('#tBudgetModelDetail'));
 }
+function _renderBudgetDistTable(entries,total,isModel,valKey,fmtVal){
+  var nameLabel=isModel?t('thModel'):t('thApp');
+  var limits=isModel?budgetModelModels:budgetAppModels;
+  var rateLabel=lang==='zh'?'使用率':'Usage';var ratioLabel=lang==='zh'?'占比':'Ratio';
+  var th='<tr><th>'+nameLabel+'</th><th>'+(budgetMode==='token'?t('thTotal'):t('thCost'))+'</th><th>'+rateLabel+'</th><th>'+ratioLabel+'</th></tr>';
+  th+=entries.map(function(e){var v=e[1][valKey]||0;var ratio=v/total*100;var limit=limits[e[0]]||0;var rate=limit>0?v/limit*100:0;return'<tr><td>'+e[0]+'</td><td>'+fmtVal(v)+'</td><td>'+(limit>0?_pctBar(rate):'<span style="color:var(--muted);font-size:11px">-</span>')+'</td><td>'+_pctBar(ratio)+'</td></tr>'}).join('');
+  return th;
+}
 function _refreshBudgetDist(){
   var _d=_fullDataAll||fullData;if(!_d)return;
+  // Sync button active states
+  ['model','app'].forEach(function(type){
+    document.querySelectorAll('._bdistBtn[data-type="'+type+'"]').forEach(function(b){
+      b.classList.toggle('active',b.dataset.period===_budgetDistPeriod[type]);
+    });
+  });
   var isToken=budgetMode==='token';var valKey=isToken?'total':'cost';
   var fmtVal=function(v){return isToken?fmt(v):fmtC(v)};
-
   var sortFn=function(a,b){return(b[1][valKey]||0)-(a[1][valKey]||0)};
-  var modelEntries=Object.entries(_d.by_model||{}).sort(sortFn);
-  var totalM=modelEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
-  var appEntries=Object.entries(_d.by_app||{}).sort(sortFn);
-  var totalA=appEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
+
+  // Model table
+  var mPeriod=_budgetDistPeriod.model;
+  if(mPeriod==='total'){
+    var modelEntries=Object.entries(_d.by_model||{}).sort(sortFn);
+    var totalM=modelEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
+    $('#tBudgetModel').innerHTML=_renderBudgetDistTable(modelEntries,totalM,true,valKey,fmtVal);
+  }else{
+    var dr=_bdistDateRange(mPeriod);
+    if(dr)pywebview.api.get_budget_dist(dr.start,dr.end).then(function(r){
+      var fd=JSON.parse(r);
+      var modelEntries=Object.entries(fd.by_model||{}).sort(sortFn);
+      var totalM=modelEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
+      $('#tBudgetModel').innerHTML=_renderBudgetDistTable(modelEntries,totalM,true,valKey,fmtVal);
+    });
+  }
+  // App table
+  var aPeriod=_budgetDistPeriod.app;
+  if(aPeriod==='total'){
+    var appEntries=Object.entries(_d.by_app||{}).sort(sortFn);
+    var totalA=appEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
+    $('#tBudgetApp').innerHTML=_renderBudgetDistTable(appEntries,totalA,false,valKey,fmtVal);
+  }else{
+    var dr2=_bdistDateRange(aPeriod);
+    if(dr2)pywebview.api.get_budget_dist(dr2.start,dr2.end).then(function(r){
+      var fd=JSON.parse(r);
+      var appEntries=Object.entries(fd.by_app||{}).sort(sortFn);
+      var totalA=appEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
+      $('#tBudgetApp').innerHTML=_renderBudgetDistTable(appEntries,totalA,false,valKey,fmtVal);
+    });
+  }
+}
+function _renderBudgetDetailTable(entries,total,isModel,valKey,fmtVal){
+  if(_isEditingBudgetInput())return;
+  var limits=isModel?budgetModelModels:budgetAppModels;
+  var nameLabel=isModel?t('thModel'):t('thApp');
   var rateLabel=lang==='zh'?'使用率':'Usage';var ratioLabel=lang==='zh'?'占比':'Ratio';
-  var th='<tr><th>'+t('thModel')+'</th><th>'+(isToken?t('thTotal'):t('thCost'))+'</th><th>'+rateLabel+'</th><th>'+ratioLabel+'</th></tr>';
-  th+=modelEntries.map(function(e){var v=e[1][valKey]||0;var ratio=v/totalM*100;var limit=budgetModelModels[e[0]]||0;var rate=limit>0?v/limit*100:0;return'<tr><td>'+e[0]+'</td><td>'+fmtVal(v)+'</td><td>'+(limit>0?_pctBar(rate):'<span style="color:var(--muted);font-size:11px">-</span>')+'</td><td>'+_pctBar(ratio)+'</td></tr>'}).join('');
-  $('#tBudgetModel').innerHTML=th;
-  var th2='<tr><th>'+t('thApp')+'</th><th>'+(isToken?t('thTotal'):t('thCost'))+'</th><th>'+rateLabel+'</th><th>'+ratioLabel+'</th></tr>';
-  th2+=appEntries.map(function(e){var v=e[1][valKey]||0;var ratio=v/totalA*100;var limit=budgetAppModels[e[0]]||0;var rate=limit>0?v/limit*100:0;return'<tr><td>'+e[0]+'</td><td>'+fmtVal(v)+'</td><td>'+(limit>0?_pctBar(rate):'<span style="color:var(--muted);font-size:11px">-</span>')+'</td><td>'+_pctBar(ratio)+'</td></tr>'}).join('');
-  $('#tBudgetApp').innerHTML=th2;
+  var btnStyle='padding:2px 8px;border:1px solid rgba(127,127,127,.2);border-radius:4px;background:var(--surface2);color:var(--text);font-size:10px;cursor:pointer;font-family:inherit';
+  var iptStyle='width:70px;background:var(--surface2);border:1px solid rgba(127,127,127,.15);color:var(--text);padding:3px 6px;border-radius:4px;font-size:11px;font-family:inherit';
+  var h='<tr><th>'+nameLabel+'</th><th>'+(lang==='zh'?'已用':'Used')+'</th><th>'+_budgetLabel()+'</th><th>'+(lang==='zh'?'操作':'Action')+'</th><th>'+rateLabel+'</th><th>'+ratioLabel+'</th></tr>';
+  var type=isModel?'model':'app';
+  entries.forEach(function(e){
+    var name=e[0],val=e[1][valKey]||0,limit=limits[name]||0;
+    var rate=limit>0?val/limit*100:0;var ratio=val/total*100;
+    h+='<tr><td>'+name+'</td><td>'+fmtVal(val)+'</td>'
+      +'<td><input type="number" class="_budgetIpt" min="0" step="1" value="'+limit+'" data-type="'+type+'" data-name="'+escH(name)+'" style="'+iptStyle+'"></td>'
+      +'<td><button class="_budgetSave" data-type="'+type+'" data-name="'+escH(name)+'" style="'+btnStyle+'">'+(lang==='zh'?'保存':'Save')+'</button>'
+      +(limit>0?' <button class="_budgetDel" data-type="'+type+'" data-name="'+escH(name)+'" style="'+btnStyle+'">X</button>':'')+'</td>'
+      +'<td>'+(limit>0?_pctBar(rate):'<span style="color:var(--muted);font-size:11px">-</span>')+'</td><td>'+_pctBar(ratio)+'</td></tr>';
+  });
+  $(isModel?'#tBudgetModelDetail':'#tBudgetAppDetail').innerHTML=h;
+}
+function _refreshBudgetDetail(){
+  var _d=_fullDataAll||fullData;if(!_d)return;
+  // Sync button active states
+  ['model','app'].forEach(function(type){
+    document.querySelectorAll('._bdetBtn[data-type="'+type+'"]').forEach(function(b){
+      b.classList.toggle('active',b.dataset.period===_budgetDetailPeriod[type]);
+    });
+  });
+  var isToken=budgetMode==='token';var valKey=isToken?'total':'cost';
+  var fmtVal=function(v){return isToken?fmt(v):fmtC(v)};
+  var sortFn=function(a,b){return(b[1][valKey]||0)-(a[1][valKey]||0)};
+
+  // Model detail
+  var mPeriod=_budgetDetailPeriod.model;
+  if(mPeriod==='total'){
+    var modelEntries=Object.entries(_d.by_model||{}).sort(sortFn);
+    var totalM=modelEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
+    _renderBudgetDetailTable(modelEntries,totalM,true,valKey,fmtVal);
+  }else{
+    var dr=_bdistDateRange(mPeriod);
+    if(dr)pywebview.api.get_budget_dist(dr.start,dr.end).then(function(r){
+      var fd=JSON.parse(r);
+      var modelEntries=Object.entries(fd.by_model||{}).sort(sortFn);
+      var totalM=modelEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
+      _renderBudgetDetailTable(modelEntries,totalM,true,valKey,fmtVal);
+    });
+  }
+  // App detail
+  var aPeriod=_budgetDetailPeriod.app;
+  if(aPeriod==='total'){
+    var appEntries=Object.entries(_d.by_app||{}).sort(sortFn);
+    var totalA=appEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
+    _renderBudgetDetailTable(appEntries,totalA,false,valKey,fmtVal);
+  }else{
+    var dr2=_bdistDateRange(aPeriod);
+    if(dr2)pywebview.api.get_budget_dist(dr2.start,dr2.end).then(function(r){
+      var fd=JSON.parse(r);
+      var appEntries=Object.entries(fd.by_app||{}).sort(sortFn);
+      var totalA=appEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
+      _renderBudgetDetailTable(appEntries,totalA,false,valKey,fmtVal);
+    });
+  }
 }
 var RING_CIRC=2*Math.PI*52;
 function setRing(id,pct){
@@ -2094,7 +2299,7 @@ function renderBudget(){
     $('#budgetMonthlyPct').className='budget-ring-value';
   }
   syncBudgetInputs();
-  // Compute per-model and per-app data
+  // Compute per-model and per-app data (use _refreshBudgetDist for period-aware rendering)
   var valKey=isToken?'total':'cost';
   var fmtVal=function(v){return isToken?fmt(v):fmtC(v)};
 
@@ -2105,41 +2310,8 @@ function renderBudget(){
   var totalA=appEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
   var rateLabel=lang==='zh'?'使用率':'Usage';
   var ratioLabel=lang==='zh'?'占比':'Ratio';
-  // Model distribution: usage rate (vs limit) + ratio (vs total)
-  var th='<tr><th>'+t('thModel')+'</th><th>'+(isToken?t('thTotal'):t('thCost'))+'</th><th>'+rateLabel+'</th><th>'+ratioLabel+'</th></tr>';
-  th+=modelEntries.map(function(e){var v=e[1][valKey]||0;var ratio=v/totalM*100;var limit=budgetModelModels[e[0]]||0;var rate=limit>0?v/limit*100:0;return'<tr><td>'+e[0]+'</td><td>'+fmtVal(v)+'</td><td>'+(limit>0?_pctBar(rate):'<span style="color:var(--muted);font-size:11px">-</span>')+'</td><td>'+_pctBar(ratio)+'</td></tr>'}).join('');
-  $('#tBudgetModel').innerHTML=th;
-  // App distribution: usage rate (vs limit) + ratio (vs total)
-  var th2='<tr><th>'+t('thApp')+'</th><th>'+(isToken?t('thTotal'):t('thCost'))+'</th><th>'+rateLabel+'</th><th>'+ratioLabel+'</th></tr>';
-  th2+=appEntries.map(function(e){var v=e[1][valKey]||0;var ratio=v/totalA*100;var limit=budgetAppModels[e[0]]||0;var rate=limit>0?v/limit*100:0;return'<tr><td>'+e[0]+'</td><td>'+fmtVal(v)+'</td><td>'+(limit>0?_pctBar(rate):'<span style="color:var(--muted);font-size:11px">-</span>')+'</td><td>'+_pctBar(ratio)+'</td></tr>'}).join('');
-  $('#tBudgetApp').innerHTML=th2;
-  // Per-app/per-model budget detail tables — skip re-render if user is editing
-  if(!_isEditingBudgetInput()){
-    var btnStyle='padding:2px 8px;border:1px solid rgba(127,127,127,.2);border-radius:4px;background:var(--surface2);color:var(--text);font-size:10px;cursor:pointer;font-family:inherit';
-    var iptStyle='width:70px;background:var(--surface2);border:1px solid rgba(127,127,127,.15);color:var(--text);padding:3px 6px;border-radius:4px;font-size:11px;font-family:inherit';
-    var appH='<tr><th>'+t('thApp')+'</th><th>'+(lang==='zh'?'已用':'Used')+'</th><th>'+_budgetLabel()+'</th><th>'+(lang==='zh'?'操作':'Action')+'</th><th>'+rateLabel+'</th><th>'+ratioLabel+'</th></tr>';
-    appEntries.forEach(function(e){
-      var name=e[0],val=e[1][valKey]||0,limit=budgetAppModels[name]||0;
-      var rate=limit>0?val/limit*100:0;var ratio=val/totalA*100;
-      appH+='<tr><td>'+name+'</td><td>'+fmtVal(val)+'</td>'
-        +'<td><input type="number" class="_budgetIpt" min="0" step="1" value="'+limit+'" data-type="app" data-name="'+escH(name)+'" style="'+iptStyle+'"></td>'
-        +'<td><button class="_budgetSave" data-type="app" data-name="'+escH(name)+'" style="'+btnStyle+'">'+(lang==='zh'?'保存':'Save')+'</button>'
-        +(limit>0?' <button class="_budgetDel" data-type="app" data-name="'+escH(name)+'" style="'+btnStyle+'">X</button>':'')+'</td>'
-        +'<td>'+(limit>0?_pctBar(rate):'<span style="color:var(--muted);font-size:11px">-</span>')+'</td><td>'+_pctBar(ratio)+'</td></tr>';
-    });
-    $('#tBudgetAppDetail').innerHTML=appH;
-    var modH='<tr><th>'+t('thModel')+'</th><th>'+(lang==='zh'?'已用':'Used')+'</th><th>'+_budgetLabel()+'</th><th>'+(lang==='zh'?'操作':'Action')+'</th><th>'+rateLabel+'</th><th>'+ratioLabel+'</th></tr>';
-    modelEntries.forEach(function(e){
-      var name=e[0],val=e[1][valKey]||0,limit=budgetModelModels[name]||0;
-      var rate=limit>0?val/limit*100:0;var ratio=val/totalM*100;
-      modH+='<tr><td>'+name+'</td><td>'+fmtVal(val)+'</td>'
-        +'<td><input type="number" class="_budgetIpt" min="0" step="1" value="'+limit+'" data-type="model" data-name="'+escH(name)+'" style="'+iptStyle+'"></td>'
-        +'<td><button class="_budgetSave" data-type="model" data-name="'+escH(name)+'" style="'+btnStyle+'">'+(lang==='zh'?'保存':'Save')+'</button>'
-        +(limit>0?' <button class="_budgetDel" data-type="model" data-name="'+escH(name)+'" style="'+btnStyle+'">X</button>':'')+'</td>'
-        +'<td>'+(limit>0?_pctBar(rate):'<span style="color:var(--muted);font-size:11px">-</span>')+'</td><td>'+_pctBar(ratio)+'</td></tr>';
-    });
-    $('#tBudgetModelDetail').innerHTML=modH;
-  }
+  _refreshBudgetDist();
+  _refreshBudgetDetail();
 }
 function checkBudget(){
   var _d=_fullDataAll||fullData;
@@ -2573,8 +2745,14 @@ function reload(){
       $('#c1s').value=allDates[mid];$('#c1e').value=allDates[allDates.length-1];
       $('#c2s').value=allDates[0];$('#c2e').value=allDates[mid-1];
     }
-    // Default to 1D view
-    try{if(allDates.length){presetDaily(1)}else{renderDaily(d)}}catch(e){console.error('daily render error:',e)}
+    // Apply saved daily preset or default to 1D
+    try{
+      if(allDates.length){
+        if(_userDailyDays!==null&&_userDailyDays>=0)presetDaily(_userDailyDays);
+        else if(_userDailyDays===-1)_refreshCurrentView();
+        else presetDaily(1);
+      }else{renderDaily(d)}
+    }catch(e){console.error('daily render error:',e)}
     $('#status').textContent=t('loaded')+' '+d.summary.total_records+' '+t('loadedSuff');
     startAutoRefresh();
     _removeOverlay();
