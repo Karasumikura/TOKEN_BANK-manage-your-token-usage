@@ -1717,8 +1717,7 @@ function mkT(el,hdrs,rows){
   rows.forEach(r=>{h+='<tr>'+r.map((c,i)=>{
     const isNum=typeof c==='number';
     const cls=isNum?' class="num"':'';
-    const val=isNum?c:(typeof c==='string'?escH(c):c);
-    return'<td'+cls+'>'+val+'</td>'}).join('')+'</tr>'});h+='</tbody>';
+    return'<td'+cls+'>'+c+'</td>'}).join('')+'</tr>'});h+='</tbody>';
   el.innerHTML=h;
 }
 function badge(a){var e=escH(a);return'<span class="badge b-'+e+'">'+e.toUpperCase()+'</span>'}
