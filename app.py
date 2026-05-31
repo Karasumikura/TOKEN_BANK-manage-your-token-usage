@@ -371,8 +371,10 @@ def quit_app(icon=None, item=None):
             _tray_icon.stop()
         if _app_window:
             _app_window.destroy()
-    # Use sys.exit instead of os._exit to allow cleanup handlers
-    sys.exit(0)
+    # Must use os._exit to terminate the entire process — sys.exit(0) only
+    # terminates the calling thread, leaving the main thread's
+    # webview.start() loop (and the process) alive.
+    os._exit(0)
 
 
 def on_closing(*args):
