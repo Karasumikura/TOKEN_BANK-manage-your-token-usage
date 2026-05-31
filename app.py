@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """TOKENBANK - Desktop Token Usage Dashboard"""
 
+import heapq
 import json
 import os
 import re
@@ -61,15 +62,29 @@ def load_custom_pricing():
 load_custom_pricing()
 
 def get_pricing(model):
+    m = (model or "").lower().strip()
+    # Exact match first
+    if m in MODEL_PRICING:
+        return MODEL_PRICING[m]
+    # Prefix match: find the longest key that is a prefix of the model name
+    best_key, best_val = None, None
     for key, val in MODEL_PRICING.items():
-        if key in (model or ""):
+        if m.startswith(key) and (best_key is None or len(key) > len(best_key)):
+            best_key, best_val = key, val
+    if best_val:
+        return best_val
+    # Substring match as last resort
+    for key, val in MODEL_PRICING.items():
+        if key in m:
             return val
     return DEFAULT_PRICING
 
 
-def calc_cost(model, inp, out, cache_read):
+def calc_cost(model, inp, out, cache_read, cache_create=0):
     p = get_pricing(model)
-    return (inp * p["input"] + out * p["output"] + cache_read * p["cache_read"]) / 1_000_000
+    # Cache creation is priced at 1.25x the regular input rate
+    cache_create_rate = p["input"] * 1.25
+    return (inp * p["input"] + out * p["output"] + cache_read * p["cache_read"] + cache_create * cache_create_rate) / 1_000_000
 
 
 # ── Data loading ─────────────────────────────────────────────────────────────
@@ -125,9 +140,9 @@ def load_claude_sessions():
                             "summary": summary, "model": model, "timestamp": ts_local,
                             "date": date_str,
                             "input": inp, "output": out, "cache_read": cr, "cache_create": cc,
-                            "cost": calc_cost(model, inp, out, cr),
+                            "cost": calc_cost(model, inp, out, cr, cc),
                         })
-        except (UnicodeDecodeError, OSError):
+        except (UnicodeDecodeError, OSError, ValueError):
             continue
         # Apply best available summary to all records for this session
         best = summary or first_prompt
@@ -197,7 +212,7 @@ def load_codex_sessions():
     if CODEX_SESSIONS.exists():
         codex_files.extend(CODEX_SESSIONS.rglob("*.jsonl"))
     if CODEX_ARCHIVED.exists():
-        codex_files.extend(CODEX_ARCHIVED.glob("*.jsonl"))
+        codex_files.extend(CODEX_ARCHIVED.rglob("*.jsonl"))
     for jsonl_path in codex_files:
         session_id = jsonl_path.stem
         session_paths[session_id] = str(jsonl_path)
@@ -258,7 +273,7 @@ def load_codex_sessions():
                             "cache_read": delta_cached, "cache_create": 0,
                             "cost": calc_cost(model or "unknown", non_cached, delta_out, delta_cached),
                         })
-        except (UnicodeDecodeError, OSError):
+        except (UnicodeDecodeError, OSError, ValueError):
             continue
     return records, session_paths
 
@@ -314,8 +329,13 @@ def load_cline_sessions():
 
 
 def decode_project(encoded):
-    if encoded.startswith("C--"):
-        return encoded.replace("--", ":/").replace("-", "/")
+    if not encoded:
+        return encoded
+    # Claude Code encodes paths: C:\Users\foo\bar -> C--Users-foo-bar
+    # Only decode if it matches the pattern: drive letter + -- + path segments
+    if re.match(r'^[A-Z]--', encoded):
+        # First -- becomes :\, then remaining - become /
+        return encoded[:1] + ':/' + encoded[3:].replace('-', '/')
     return encoded
 
 
@@ -325,6 +345,7 @@ _dialog_queue = queue.Queue()
 _app_window = None
 _saved_window_size = None
 _tray_icon = None
+_window_lock = threading.Lock()
 
 
 def create_tray_image():
@@ -337,20 +358,21 @@ def create_tray_image():
 
 def show_window(icon=None, item=None):
     global _app_window
-    if _app_window:
-        _app_window.show()
-        _app_window.restore()
+    with _window_lock:
+        if _app_window:
+            _app_window.show()
+            _app_window.restore()
 
 
 def quit_app(icon=None, item=None):
     global _app_window, _tray_icon
-    if _tray_icon:
-        _tray_icon.stop()
-    if _app_window:
-        _app_window.destroy()
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os._exit(0)
+    with _window_lock:
+        if _tray_icon:
+            _tray_icon.stop()
+        if _app_window:
+            _app_window.destroy()
+    # Use sys.exit instead of os._exit to allow cleanup handlers
+    sys.exit(0)
 
 
 def on_closing(*args):
@@ -371,9 +393,10 @@ def dialog_worker():
                     3 | 0x40 | 0x1000,
                 )
                 if result == 6:
-                    if _app_window:
-                        _app_window.minimize()
-                        _app_window.hide()
+                    with _window_lock:
+                        if _app_window:
+                            _app_window.minimize()
+                            _app_window.hide()
                 else:
                     quit_app()
             except Exception:
@@ -528,8 +551,9 @@ class Api:
                                         if delta_inp == 0 and delta_out == 0:
                                             continue
                                         delta_cached = min(delta_cached, delta_inp)
+                                        non_cached = max(0, delta_inp - delta_cached)
                                         messages.append({"type": "token", "ts": ts,
-                                                         "input": delta_inp,
+                                                         "input": non_cached,
                                                          "output": delta_out,
                                                          "cache_read": delta_cached})
                             except json.JSONDecodeError:
@@ -656,8 +680,8 @@ class Api:
         custom_path = Path.home() / ".tokenbank" / "pricing.json"
         if custom_path.exists():
             custom_path.unlink()
-        MODEL_PRICING.clear()
-        MODEL_PRICING.update({
+        # Atomic replacement: update first, then remove stale keys (avoids empty-dict window)
+        _defaults = {
             "claude-opus-4-7": {"input": 5.0, "output": 25.0, "cache_read": 0.5},
             "claude-opus-4-6": {"input": 5.0, "output": 25.0, "cache_read": 0.5},
             "claude-opus-4-5": {"input": 5.0, "output": 25.0, "cache_read": 0.5},
@@ -668,7 +692,11 @@ class Api:
             "mimo-v2.5-pro": {"input": 0.0, "output": 0.0, "cache_read": 0.0},
             "gpt-5.4": {"input": 2.5, "output": 15.0, "cache_read": 0.25},
             "gpt-5.5": {"input": 5.0, "output": 30.0, "cache_read": 0.5},
-        })
+        }
+        MODEL_PRICING.update(_defaults)
+        for k in list(MODEL_PRICING.keys()):
+            if k not in _defaults:
+                del MODEL_PRICING[k]
         self._records = None
         return json.dumps({"ok": True})
 
@@ -687,7 +715,7 @@ class Api:
         (d / "pricing.json").write_text(json.dumps(custom, indent=2), encoding="utf-8")
 
     def _process(self, records):
-        _new = lambda: {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0, "cost": 0.0, "count": 0}
+        _new = lambda: {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0, "cost": 0.0, "count": 0, "total": 0}
         by_app = defaultdict(_new)
         by_model = defaultdict(_new)
         by_date = defaultdict(_new)
@@ -696,27 +724,32 @@ class Api:
         for r in records:
             cc = r.get("cache_create", 0)
             cnt = r.get("count", 1)
+            r_total = r["input"] + r["output"] + r["cache_read"] + cc
             a = by_app[r["app"]]
-            a["input"] += r["input"]; a["output"] += r["output"]; a["cache_read"] += r["cache_read"]; a["cache_create"] += cc; a["cost"] += r["cost"]; a["count"] += cnt
+            a["input"] += r["input"]; a["output"] += r["output"]; a["cache_read"] += r["cache_read"]; a["cache_create"] += cc; a["cost"] += r["cost"]; a["count"] += cnt; a["total"] += r_total
             m = by_model[r["model"]]
-            m["input"] += r["input"]; m["output"] += r["output"]; m["cache_read"] += r["cache_read"]; m["cache_create"] += cc; m["cost"] += r["cost"]; m["count"] += cnt
+            m["input"] += r["input"]; m["output"] += r["output"]; m["cache_read"] += r["cache_read"]; m["cache_create"] += cc; m["cost"] += r["cost"]; m["count"] += cnt; m["total"] += r_total
             if r["date"]:
                 d = by_date[r["date"]]
-                d["input"] += r["input"]; d["output"] += r["output"]; d["cache_read"] += r["cache_read"]; d["cache_create"] += cc; d["cost"] += r["cost"]; d["count"] += cnt
+                d["input"] += r["input"]; d["output"] += r["output"]; d["cache_read"] += r["cache_read"]; d["cache_create"] += cc; d["cost"] += r["cost"]; d["count"] += cnt; d["total"] += r_total
             p = by_proj[r["project"]]
-            p["input"] += r["input"]; p["output"] += r["output"]; p["cache_read"] += r["cache_read"]; p["cache_create"] += cc; p["cost"] += r["cost"]; p["count"] += cnt; p["sessions"].add(r["session"])
+            p["input"] += r["input"]; p["output"] += r["output"]; p["cache_read"] += r["cache_read"]; p["cache_create"] += cc; p["cost"] += r["cost"]; p["count"] += cnt; p["sessions"].add(r["session"]); p["total"] += r_total
             s = by_sess[r["session"]]
-            s["app"] = r["app"]; s["project"] = r["project"]; s["model"] = r["model"]; s["date"] = r["date"]
+            # Keep first non-empty metadata (don't overwrite with later records)
+            if not s["app"]: s["app"] = r["app"]
+            if not s["project"]: s["project"] = r["project"]
+            if not s["model"]: s["model"] = r["model"]
+            if not s["date"]: s["date"] = r["date"]
             if r.get("summary"): s["summary"] = r["summary"]
-            s["input"] += r["input"]; s["output"] += r["output"]; s["cache_read"] += r["cache_read"]; s["cache_create"] += cc; s["cost"] += r["cost"]; s["count"] += cnt
+            s["input"] += r["input"]; s["output"] += r["output"]; s["cache_read"] += r["cache_read"]; s["cache_create"] += cc; s["cost"] += r["cost"]; s["count"] += cnt; s["total"] += r_total
 
         total_input_full = sum(a["input"] + a["cache_read"] + a["cache_create"] for a in by_app.values())
         total_cache_read = sum(a["cache_read"] for a in by_app.values())
         cache_rate = (total_cache_read / total_input_full * 100) if total_input_full else 0
-        sorted_records = sorted(records, key=lambda r: r.get("timestamp", ""), reverse=True)
+        # Use heapq to get 10 most recent records without sorting all records
         seen = set()
         recent_deduped = []
-        for r in sorted_records:
+        for r in heapq.nlargest(len(records) if len(records) < 100 else 100, records, key=lambda r: r.get("timestamp", "")):
             key = (r["session"], r.get("timestamp", ""))
             if key not in seen:
                 seen.add(key)
@@ -739,11 +772,11 @@ class Api:
                 "total_records": len(records),
                 "cache_rate": round(cache_rate, 1),
             },
-            "by_app": {k: {**dict(v), "total": v["input"] + v["output"] + v["cache_read"] + v["cache_create"]} for k, v in by_app.items()},
-            "by_model": {k: {**dict(v), "total": v["input"] + v["output"] + v["cache_read"] + v["cache_create"]} for k, v in sorted(by_model.items(), key=lambda x: x[1]["input"] + x[1]["cache_read"] + x[1]["output"], reverse=True)},
-            "daily": [{"date": d, **v, "total": v["input"] + v["output"] + v["cache_read"] + v["cache_create"]} for d, v in sorted(by_date.items())],
-            "projects": [{"name": decode_project(k), "sessions": len(v["sessions"]), "total": v["input"] + v["output"] + v["cache_read"] + v["cache_create"], **{x: v[x] for x in ("count", "input", "output", "cache_read", "cache_create", "cost")}} for k, v in sorted(by_proj.items(), key=lambda x: x[1]["input"] + x[1]["cache_read"] + x[1]["output"], reverse=True)],
-            "sessions": [{"id": k, "total": v["input"] + v["output"] + v["cache_read"] + v["cache_create"], **{x: v[x] for x in ("app", "project", "model", "date", "summary", "count", "input", "output", "cache_read", "cache_create", "cost")}} for k, v in sorted(by_sess.items(), key=lambda x: x[1]["input"] + x[1]["cache_read"] + x[1]["output"], reverse=True)[:100]],
+            "by_app": {k: {**dict(v)} for k, v in by_app.items()},
+            "by_model": {k: {**dict(v)} for k, v in sorted(by_model.items(), key=lambda x: x[1]["total"], reverse=True)},
+            "daily": [{"date": d, **v} for d, v in sorted(by_date.items())],
+            "projects": [{"name": decode_project(k), "sessions": len(v["sessions"]), **{x: v[x] for x in ("total", "count", "input", "output", "cache_read", "cache_create", "cost")}} for k, v in sorted(by_proj.items(), key=lambda x: x[1]["total"], reverse=True)],
+            "sessions": [{"id": k, **{x: v[x] for x in ("total", "app", "project", "model", "date", "summary", "count", "input", "output", "cache_read", "cache_create", "cost")}} for k, v in sorted(by_sess.items(), key=lambda x: x[1]["total"], reverse=True)[:100]],
             "recent": recent_out,
         }
 
@@ -1014,7 +1047,7 @@ tr:hover td{background:rgba(255,255,255,.05)}
 .budget-ring-wrap{position:relative;width:120px;height:120px;flex-shrink:0}
 .budget-ring{width:100%;height:100%;transform:rotate(-90deg)}
 .budget-ring-bg{fill:none;stroke:var(--surface2);stroke-width:8}
-.budget-ring-fill{fill:none;stroke-width:8;stroke-linecap:round;stroke-dasharray:326.73;stroke-dashoffset:326.73;transition:stroke-dashoffset 1.4s var(--ease-elastic),stroke .4s ease}
+.budget-ring-fill{fill:none;stroke-width:8;stroke-linecap:round;stroke-dasharray:326.7256;stroke-dashoffset:326.7256;transition:stroke-dashoffset 1.4s var(--ease-elastic),stroke .4s ease}
 .budget-ring-center{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center}
 .budget-ring-value{font-size:22px;font-weight:800;line-height:1}
 .budget-ring-label{font-size:10px;color:var(--muted);margin-top:2px}
@@ -1555,13 +1588,17 @@ function startAutoRefresh(){
   if(autoRefreshEnabled&&refreshIntervalSec>0){
     _autoRefreshTimer=setInterval(function(){
       _animEnabled=false;
-      pywebview.api.reload().then(function(r){
-        var d=JSON.parse(r);fullData=d;_fullDataAll=d;
-        render(d);_refreshCurrentView();renderModelTrends();checkBudget();renderBudget();
-        if(d.daily.length){allDates=d.daily.map(function(x){return x.date})}
-        $('#status').textContent=t('loaded')+' '+d.summary.total_records+' '+t('loadedSuff');
-        _animEnabled=true;
-      });
+      try{
+        pywebview.api.reload().then(function(r){
+          try{
+            var d=JSON.parse(r);fullData=d;_fullDataAll=d;
+            render(d);_refreshCurrentView();renderModelTrends();checkBudget();renderBudget();
+            if(d.daily.length){allDates=d.daily.map(function(x){return x.date})}
+            $('#status').textContent=t('loaded')+' '+d.summary.total_records+' '+t('loadedSuff');
+          }catch(e){console.error('auto-refresh parse/render error:',e)}
+          finally{_animEnabled=true}
+        }).catch(function(e){console.error('auto-refresh reload error:',e);_animEnabled=true});
+      }catch(e){console.error('auto-refresh error:',e);_animEnabled=true}
     },refreshIntervalSec*1000);
   }
 }
@@ -1633,7 +1670,7 @@ function applyLang(){
 
 // ── Chart helpers ──
 var _animEnabled=true;
-function kill(k){if(charts[k]){charts[k].destroy();delete charts[k]}}
+function kill(k){if(charts[k]){charts[k].destroy();delete charts[k]}if(_doughnutTimers[k]){clearTimeout(_doughnutTimers[k]);delete _doughnutTimers[k]}}
 const _easeSpring='cubicBezier(.34,1.56,.64,1)';
 const _easeElastic='cubicBezier(.68,-.55,.27,1.55)';
 const _easeBounce='cubicBezier(.34,1.8,.64,1)';
@@ -1680,7 +1717,8 @@ function mkT(el,hdrs,rows){
   rows.forEach(r=>{h+='<tr>'+r.map((c,i)=>{
     const isNum=typeof c==='number';
     const cls=isNum?' class="num"':'';
-    return'<td'+cls+'>'+c+'</td>'}).join('')+'</tr>'});h+='</tbody>';
+    const val=isNum?c:(typeof c==='string'?escH(c):c);
+    return'<td'+cls+'>'+val+'</td>'}).join('')+'</tr>'});h+='</tbody>';
   el.innerHTML=h;
 }
 function badge(a){var e=escH(a);return'<span class="badge b-'+e+'">'+e.toUpperCase()+'</span>'}
@@ -2129,35 +2167,60 @@ function _refreshBudgetDist(){
   var fmtVal=function(v){return isToken?fmt(v):fmtC(v)};
   var sortFn=function(a,b){return(b[1][valKey]||0)-(a[1][valKey]||0)};
 
-  // Model table
+  // Helper to render both model and app tables from same data
+  function renderDistTables(fd){
+    var modelEntries=Object.entries(fd.by_model||{}).sort(sortFn);
+    var totalM=modelEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
+    $('#tBudgetModel').innerHTML=_renderBudgetDistTable(modelEntries,totalM,true,valKey,fmtVal);
+    var appEntries=Object.entries(fd.by_app||{}).sort(sortFn);
+    var totalA=appEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
+    $('#tBudgetApp').innerHTML=_renderBudgetDistTable(appEntries,totalA,false,valKey,fmtVal);
+  }
+
   var mPeriod=_budgetDistPeriod.model;
+  var aPeriod=_budgetDistPeriod.app;
+
+  // Both total: use cached data, no API call needed
+  if(mPeriod==='total'&&aPeriod==='total'){
+    renderDistTables(_d);return;
+  }
+  // Both same non-total period: single API call
+  if(mPeriod===aPeriod&&mPeriod!=='total'){
+    var dr=_bdistDateRange(mPeriod);
+    if(dr)pywebview.api.get_budget_dist(dr.start,dr.end).then(function(r){
+      renderDistTables(JSON.parse(r));
+    }).catch(function(e){console.error('budget dist error:',e)});
+    return;
+  }
+  // Mixed: render total from cache, fetch non-total separately
   if(mPeriod==='total'){
     var modelEntries=Object.entries(_d.by_model||{}).sort(sortFn);
     var totalM=modelEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
     $('#tBudgetModel').innerHTML=_renderBudgetDistTable(modelEntries,totalM,true,valKey,fmtVal);
-  }else{
+  }
+  if(aPeriod==='total'){
+    var appEntries=Object.entries(_d.by_app||{}).sort(sortFn);
+    var totalA=appEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
+    $('#tBudgetApp').innerHTML=_renderBudgetDistTable(appEntries,totalA,false,valKey,fmtVal);
+  }
+  // Fetch non-total periods
+  if(mPeriod!=='total'){
     var dr=_bdistDateRange(mPeriod);
     if(dr)pywebview.api.get_budget_dist(dr.start,dr.end).then(function(r){
       var fd=JSON.parse(r);
       var modelEntries=Object.entries(fd.by_model||{}).sort(sortFn);
       var totalM=modelEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
       $('#tBudgetModel').innerHTML=_renderBudgetDistTable(modelEntries,totalM,true,valKey,fmtVal);
-    });
+    }).catch(function(e){console.error('budget dist model error:',e)});
   }
-  // App table
-  var aPeriod=_budgetDistPeriod.app;
-  if(aPeriod==='total'){
-    var appEntries=Object.entries(_d.by_app||{}).sort(sortFn);
-    var totalA=appEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
-    $('#tBudgetApp').innerHTML=_renderBudgetDistTable(appEntries,totalA,false,valKey,fmtVal);
-  }else{
+  if(aPeriod!=='total'){
     var dr2=_bdistDateRange(aPeriod);
     if(dr2)pywebview.api.get_budget_dist(dr2.start,dr2.end).then(function(r){
       var fd=JSON.parse(r);
       var appEntries=Object.entries(fd.by_app||{}).sort(sortFn);
       var totalA=appEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
       $('#tBudgetApp').innerHTML=_renderBudgetDistTable(appEntries,totalA,false,valKey,fmtVal);
-    });
+    }).catch(function(e){console.error('budget dist app error:',e)});
   }
 }
 function _renderBudgetDetailTable(entries,total,isModel,valKey,fmtVal){
@@ -2192,38 +2255,62 @@ function _refreshBudgetDetail(){
   var fmtVal=function(v){return isToken?fmt(v):fmtC(v)};
   var sortFn=function(a,b){return(b[1][valKey]||0)-(a[1][valKey]||0)};
 
-  // Model detail
+  // Helper to render both model and app detail tables from same data
+  function renderDetailTables(fd){
+    var modelEntries=Object.entries(fd.by_model||{}).sort(sortFn);
+    var totalM=modelEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
+    _renderBudgetDetailTable(modelEntries,totalM,true,valKey,fmtVal);
+    var appEntries=Object.entries(fd.by_app||{}).sort(sortFn);
+    var totalA=appEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
+    _renderBudgetDetailTable(appEntries,totalA,false,valKey,fmtVal);
+  }
+
   var mPeriod=_budgetDetailPeriod.model;
+  var aPeriod=_budgetDetailPeriod.app;
+
+  // Both total: use cached data
+  if(mPeriod==='total'&&aPeriod==='total'){
+    renderDetailTables(_d);return;
+  }
+  // Both same non-total period: single API call
+  if(mPeriod===aPeriod&&mPeriod!=='total'){
+    var dr=_bdistDateRange(mPeriod);
+    if(dr)pywebview.api.get_budget_dist(dr.start,dr.end).then(function(r){
+      renderDetailTables(JSON.parse(r));
+    }).catch(function(e){console.error('budget detail error:',e)});
+    return;
+  }
+  // Mixed: render total from cache, fetch non-total separately
   if(mPeriod==='total'){
     var modelEntries=Object.entries(_d.by_model||{}).sort(sortFn);
     var totalM=modelEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
     _renderBudgetDetailTable(modelEntries,totalM,true,valKey,fmtVal);
-  }else{
+  }
+  if(aPeriod==='total'){
+    var appEntries=Object.entries(_d.by_app||{}).sort(sortFn);
+    var totalA=appEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
+    _renderBudgetDetailTable(appEntries,totalA,false,valKey,fmtVal);
+  }
+  if(mPeriod!=='total'){
     var dr=_bdistDateRange(mPeriod);
     if(dr)pywebview.api.get_budget_dist(dr.start,dr.end).then(function(r){
       var fd=JSON.parse(r);
       var modelEntries=Object.entries(fd.by_model||{}).sort(sortFn);
       var totalM=modelEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
       _renderBudgetDetailTable(modelEntries,totalM,true,valKey,fmtVal);
-    });
+    }).catch(function(e){console.error('budget detail model error:',e)});
   }
-  // App detail
-  var aPeriod=_budgetDetailPeriod.app;
-  if(aPeriod==='total'){
-    var appEntries=Object.entries(_d.by_app||{}).sort(sortFn);
-    var totalA=appEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
-    _renderBudgetDetailTable(appEntries,totalA,false,valKey,fmtVal);
-  }else{
+  if(aPeriod!=='total'){
     var dr2=_bdistDateRange(aPeriod);
     if(dr2)pywebview.api.get_budget_dist(dr2.start,dr2.end).then(function(r){
       var fd=JSON.parse(r);
       var appEntries=Object.entries(fd.by_app||{}).sort(sortFn);
       var totalA=appEntries.reduce(function(s,e){return s+(e[1][valKey]||0)},0)||1;
       _renderBudgetDetailTable(appEntries,totalA,false,valKey,fmtVal);
-    });
+    }).catch(function(e){console.error('budget detail app error:',e)});
   }
 }
-var RING_CIRC=2*Math.PI*52;
+var RING_CIRC=2*Math.PI*52; // ~326.73, matches CSS stroke-dasharray
 function setRing(id,pct){
   var el=document.getElementById(id);if(!el)return;
   var p=Math.min(pct,100);
@@ -2436,7 +2523,10 @@ function renderHeatmap(start,end){
   if(!canvas)return;
   var ctx=canvas.getContext('2d');if(!ctx)return;
   var dpr=window.devicePixelRatio||1;
-  var cw=600,ch=180;
+  // Responsive width based on container
+  var container=canvas.parentElement;
+  var cw=Math.max(400,container?container.clientWidth-36:600);
+  var ch=180;
   canvas.width=cw*dpr;canvas.height=ch*dpr;
   canvas.style.width=cw+'px';canvas.style.height=ch+'px';
   ctx.scale(dpr,dpr);
@@ -2455,7 +2545,9 @@ function renderHeatmap(start,end){
     var maxVal=0;
     for(var d=0;d<numRows;d++){if(data[d])for(var h=0;h<24;h++){var v=data[d][h]||0;if(v>maxVal)maxVal=v}}
     if(maxVal===0){ctx.font='12px Inter,sans-serif';ctx.fillStyle='#71717a';ctx.fillText(t('noData'),cw/2-20,ch/2);return}
-    var cellW=22,cellH=20,padL=labels.length?42:28,padT=22;
+    // Responsive cell width based on canvas width
+    var cellW=Math.max(16,Math.min(24,Math.floor((cw-(labels.length?42:28))/24)));
+    var cellH=20,padL=labels.length?42:28,padT=22;
     var rowLabels=labels.length?labels:[t('mo'),t('tu'),t('we'),t('th'),t('fr'),t('sa'),t('su')];
     // Resize canvas if needed
     var neededH=padT+numRows*cellH+4;
@@ -2489,8 +2581,18 @@ function renderHeatmap(start,end){
 }
 
 // ── Model Trends ──
-function renderModelTrends(){
-  pywebview.api.get_model_daily().then(function(r){
+function renderModelTrends(startDate,endDate){
+  var start=startDate||'';var end=endDate||'';
+  // If no dates provided, use current view range
+  if(!start||!end){
+    var _d=_fullDataAll||fullData;
+    if(_d&&_d.daily&&_d.daily.length){
+      // Use last 30 days by default for performance
+      var dd=_d.daily;var n=Math.min(dd.length,30);
+      start=dd[dd.length-n].date;end=dd[dd.length-1].date;
+    }
+  }
+  pywebview.api.get_model_daily(start,end).then(function(r){
     var data=JSON.parse(r);
     if(!data.length)return;
     var models={};
@@ -2539,11 +2641,11 @@ function extractTableRows(sel){
   var table=$(sel);if(!table)return[];
   var rows=[];
   table.querySelectorAll('thead tr').forEach(function(tr){
-    var cols=[];tr.querySelectorAll('th').forEach(function(th){cols.push('"'+th.textContent.trim()+'"')});rows.push(cols);
+    var cols=[];tr.querySelectorAll('th').forEach(function(th){cols.push('"'+th.textContent.trim().replace(/"/g,'""')+'"')});rows.push(cols);
   });
   table.querySelectorAll('tbody tr').forEach(function(tr){
     if(tr.classList.contains('sess-detail'))return;
-    var cols=[];tr.querySelectorAll('td').forEach(function(td){cols.push('"'+td.textContent.trim()+'"')});rows.push(cols);
+    var cols=[];tr.querySelectorAll('td').forEach(function(td){cols.push('"'+td.textContent.trim().replace(/"/g,'""')+'"')});rows.push(cols);
   });
   return rows;
 }
@@ -2763,8 +2865,13 @@ function reload(){
   });
 }
 
+var _resizeRaf=null;
 window.addEventListener('resize',function(){
-  if(typeof Chart!=='undefined'){Chart.instances&&Object.values(Chart.instances).forEach(function(c){try{c.resize()}catch(e){}})}
+  if(_resizeRaf)return;
+  _resizeRaf=requestAnimationFrame(function(){
+    _resizeRaf=null;
+    if(typeof Chart!=='undefined'){Chart.instances&&Object.values(Chart.instances).forEach(function(c){try{c.resize()}catch(e){}})}
+  });
 });
 window.addEventListener('pywebviewready',function(){initSettings();reload()});
 </script>
